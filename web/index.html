@@ -77,7 +77,15 @@
       <option value="slice">Tree-index slice, 1/16 (33 k groups)</option>
     </select>
   </label>
-  <label>Information bit floor <span id="floor-out"></span><input type="range" id="floor" min="0" max="200" step="1" value="0"></label>
+  <label>Information bit floor <span id="floor-out"></span><input type="range" id="floor" min="0" max="10" step="1" value="0"></label>
+  <label>A read keeps
+    <select id="margin">
+      <option value="-1">Every group over the floor</option>
+      <option value="3">Its best group, within 3 bits (kfp)</option>
+      <option value="0">Its best group, ties only</option>
+      <option value="10">Its best group, within 10 bits</option>
+    </select>
+  </label>
   <label>A hit is correct if
     <select id="truth">
       <option value="2">True group only</option>
@@ -102,25 +110,26 @@
     <div>Precision per read<b id="p-precision">–</b></div>
     <div>Recall per read<b id="p-recall">–</b></div>
     <div>AUPRC<b id="p-auprc">–</b></div>
-    <div>Hits needed<b id="p-hits">–</b></div>
+    <div>Bits per key, mean (5–95%)<b id="p-hits">–</b></div>
     <div>Other groups per read<b id="p-others">–</b></div>
     <div>Chance groups per read<b id="p-chance">–</b></div>
     <div>Precision per target<b id="p-target-precision">–</b></div>
     <div>Recall per target<b id="p-target-recall">–</b></div>
     <div>Depth, read pairs per target<b id="p-depth">–</b></div>
   </div>
-  <div id="precision-plots"><div id="plot-pr"></div></div>
+  <div id="precision-plots"><div id="plot-pr"></div><div id="plot-floor-precision"></div><div id="plot-floor-recall"></div></div>
 </div>
 <p class="note">Measured on the selected index with k from the sliders above, at any sparsity: protein
 reads, pairs of 50 aa, with no translation or errors. Each k-mer a read shares with a group is kept at
-1 in m, so hits are binomial, which averages over hash functions; one index is one draw, shown as a
-range where measured. The floor uses kfp's evidence with one size of key. These indexes are one
-representative per MGnify90 unit and denser than the release, so values do not carry over to it.
-At k 5 and 6, relatives' identities are mostly unknown and count as wrong, so "or a relative" reads low.
-The bit floor is not yet calibrated to kfp's scores, whose bits vary by key. Per-target values take even
-abundance and were tested only at depth 6, where recall per target is up to 0.14 too high at 1 in 32;
-expect worse at greater depth, as reads of one target share k-mers. Chance is small here but grows with
-the index. Assignment to the best group is not modelled here.</p>
+1 in m, simulated over 8 hash salts, so very sparse settings rest on few hits; one index is one draw,
+shown as a range where measured. Scores are kfp's evidence: each key's bits (composition less log2 of the groups holding it)
+less about 9 bits per hit after the first, for every frame's windows. Floors below a key's bits change
+nothing, so low floors only matter at small k or for promiscuous keys. Chance from 2 more frames is
+added. These indexes are one representative per MGnify90 unit and denser than the release, so values
+do not carry over to it. At k 5 and 6, relatives' identities are mostly unknown and count as wrong, so
+"or a relative" reads low. Per-target values take even abundance and were tested only at depth 6, where
+recall per target is up to 0.14 too high at 1 in 32; expect worse at greater depth, as reads of one
+target share k-mers. Chance grows with the index.</p>
 <p class="note">Model: k-mer anchors on group representatives, with conserved and variable blocks
 fitted to kfp's 90%-AAI table (recall ceiling 0.96), and a conservation rate shared by each read
 fitted to the simulation. Index size assumes 225 residues per

@@ -373,8 +373,8 @@ been measured:
 - Best-group assignment from a stored panel of reads, or from the grid at set values.
 - *Done when:* page values match a held-out simulation at settings not used for its tables.
 - The analytic model stays for what has no table: other k and quick exploration. Tables win where they exist.
-- **Not done yet:** bit bands, best-group assignment, decoy-calibrated floor, tables for other alphabets
-  and policies, and per-target checks beyond depth 6.
+- **Not done yet:** tables for other alphabets and policies, per-target checks beyond depth 6 or with a
+  floor, kfp's sampling of rare keys, and groups larger than one representative.
 
 **Phase 5: index selection, scenarios and scale.** A selector for the index, with each index
 supplying its target lengths, group sizes and homologue spectrum (mini-slice and MGnify at first, a
@@ -385,6 +385,11 @@ and massive indexes, and a breakdown of recall, precision and postings by target
 size respond to both, from measured retention by (policy, radius, identity). Relatives within the
 radius count as correct. *Done when:* the model reproduces kfp's matched comparisons, such as
 `tree:0.34`, `tree:0.57` and `tree:0.83` at composite 0.25, and composite 0 against 0.25.
+
+Run `measure/precision_tables.py` on keys built kfp's way (group radius, then soft intersection or
+frequency ranking, with kfp's key budgets), not only on single representatives. This also tests whether
+those groups explain kfp's heavier chance tail: at 40 bits and k 5 the current tables are 4–25× below
+kfp's decoys, probably because of sticky leaves.
 
 **Phase 7: SNP and overlap panel.** The miss probabilities above, with a key-placement diagram.
 
@@ -565,9 +570,36 @@ by the user.
     against 0.66. Using each query's own M reduces RMSE to 0.080, right at the check's limit. It stays 0.09–0.14
     too high at m 32, probably since reads of one target share k-mers and hash decisions. False groups:
     log-ratio RMSE 0.21. Greater depth is untested and likely worse. The chance term's growth exponent is kfp's.
-  - **The floor is simplified.** One bits value per k-mer, kfp's formula, no bit bands, and not calibrated
-    to kfp's real scores. It behaves as a hit threshold.
+  - The floor here used one bits value per k-mer. Replaced by the next entry.
   - At k 5–6 relatives are mostly not aligned, and count as wrong for "or a relative" truth levels.
+
+- **2026-11-04: real floors and best-group assignment.** The tables now hold each read's real score across
+  floors none, 5, 10, 20, 30, 40, 60, 80, 120, 160, 200 and m 1 to 8,192, over 8 salts, and the best-group
+  rule at margins 0, 3 (kfp's default) and 10 bits. Scores are kfp's evidence: key bits = −log2 q0 − log2 g
+  (g here the groups holding the k-mer, in kfp the key's gains), less log2(windows in all 6 frames) per hit
+  after the first. The page has a discrete floor slider and plots across floors for every k. About 30 ms per
+  update, 1.1 s start-up, tables 2.7 MB per index. `checks/test_tables.py` passes.
+  - **Calibration, nothing fitted.** At k 5: 9.1 + 7.7 bits per hit, against kfp's fitted 9 + 8. Mean key bits
+    on the slice: k 7, 29.0 against 29.1 in kfp's index; k 11, 45.7 against 45.4. kfp's sample keys
+    rarest-first and on composites, so these agree on scale, not sampler.
+  - **Decoys at k 5 against kfp:** at 30 bits, 0.03–0.16 per pair (m 16 to 8), which brackets kfp's 0.089. At 40
+    bits, 0.0003–0.0018 against kfp's 0.0074, so **4–25× too low**. kfp's tail is heavier, probably from sticky
+    leaves: its groups hold keys in proportion to √members, and these are single representatives.
+  - **Reads over a high bar:** kfp at 90.5 bits has 0.77 / 0.46 / 0.29 / 0.13 / 0.02 at identity 1.0 / 0.95 / 0.9 /
+    0.8 / 0.7. At m 8 the true group at 80 bits has 0.68 / 0.62 / 0.45 / 0.19 / 0.04, and at 120 bits 0.20 /
+    0.16 / 0.10 / 0.03 / 0.01, which brackets kfp except at identity 1.0. At m 16 it is far lower, though kfp has
+    a key per ~12 residues, so a kfp index behaves like a denser hash-sampled one.
+  - **Held-out** (different queries, means over salts, k 5, 7, 9, 11, m 1–128, all floors). Every group over the
+    floor: recall RMSE 0.007, others 12%, precision 12%, precision at x ≥ 0.7 is 5%. Best group within 3 bits:
+    recall 0.005, others 17%, precision 14%, precision at x ≥ 0.7 is 3%. Tables read slightly high on precision.
+  - **Per target at depth 6:** called RMSE 0.037. False groups are too high at sparse settings and small k (k 5, m 32:
+    298 against 146), though close at k 9, m 8 (61 against 62). Tested with no floor only, against one hash draw.
+  - **What the values show, on the mini-slice** (k 9, m 8, natural mix, 5% no relative). Every group: precision
+    0.63 at x ≥ 0.7, 48 others per read. Best within 3 bits: 0.96 at x ≥ 0.7, or 0.11 against the true group
+    alone, recall 0.85. The same on the slice: 0.48 against the true group alone.
+  - **Low floors:** floors below a key's bits change nothing. At k 9 floors up to 30 are identical (5–95% of keys
+    hold 34–41 bits). They matter at k 5 (20 bits: precision at x ≥ 0.7 rises from 0.08 to 0.52, recall 0.98
+    to 0.96) and slightly at k 6. Floors under about 15 bits would need k 4 or below, which has no table.
 
 ## Licence
 

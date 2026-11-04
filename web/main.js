@@ -1,6 +1,6 @@
 // @ts-check
 /* global Plotly */
-const IDS = ['alphabet', 'k', 'm', 'length', 'identity', 'proteins', 'rep_share', 'index-set', 'floor', 'truth', 'mix', 'no_relative', 'reads', 'targets']; // alphabet first: it sets k's range
+const IDS = ['alphabet', 'k', 'm', 'length', 'identity', 'proteins', 'rep_share', 'index-set', 'floor', 'margin', 'truth', 'mix', 'no_relative', 'reads', 'targets']; // alphabet first: it sets k's range
 const el = (id) => /** @type {HTMLInputElement} */ (document.getElementById(id));
 
 const compact = (x) => (x >= 1e4 || (x > 0 && x < 0.01) ? x.toExponential(1).replace('e+', 'e') : x >= 100 ? x.toFixed(0) : x.toPrecision(2));
@@ -18,6 +18,7 @@ function params() {
     paired: el('paired').checked,
     index: el('index-set').value,
     floor: +el('floor').value,
+    margin: +el('margin').value,
     truth: +el('truth').value,
     mix: el('mix').value,
     no_relative: +el('no_relative').value,
@@ -33,7 +34,8 @@ function showInputs(p) {
   el('identity-out').textContent = p.identity.toFixed(2);
   el('proteins-out').textContent = p.proteins.toExponential(1).replace('e+', 'e');
   el('rep_share-out').textContent = p.rep_share.toFixed(3);
-  el('floor-out').textContent = `${p.floor} bits`;
+  const floor = FLOORS[p.floor];
+  el('floor-out').textContent = floor === 0 ? 'none' : `${floor} bits`;
   el('no_relative-out').textContent = p.no_relative.toFixed(2);
   el('reads-out').textContent = p.reads.toExponential(1).replace('e+', 'e');
   el('targets-out').textContent = p.targets.toExponential(1).replace('e+', 'e');
@@ -66,6 +68,9 @@ function gridForSparsity(p) {
   return [{ ...SIMULATED, name: `Simulated (${grid.identity_bins[b]}+)`, x: rows.map((x) => x.m), y: rows.map((x) => x.recall[b]) }];
 }
 
+const FLOORS = [0, 5, 10, 20, 30, 40, 60, 80, 120, 160, 200]; // measure/precision_tables.py
+const NO_FLOOR_X = 2.5; // where 'no floor' sits on the log axis
+
 function drawPrecision(q, p) {
   const off = el('precision-unavailable');
   off.hidden = q.available;
@@ -81,20 +86,17 @@ function drawPrecision(q, p) {
   el('p-precision').textContent = `${value(q.precision)}${spread}`;
   el('p-recall').textContent = value(q.recall);
   el('p-auprc').textContent = value(q.auprc);
-  el('p-hits').textContent = q.over_limit ? 'over 12' : String(q.hits_needed);
+  el('p-hits').textContent = `${q.key_bits[0].toFixed(1)} (${q.key_bits[1].toFixed(0)}–${q.key_bits[2].toFixed(0)})`;
   el('p-others').textContent = compact(q.others);
   el('p-chance').textContent = q.chance === 0 ? '0' : compact(q.chance);
   el('p-target-precision').textContent = value(q.target_precision);
   el('p-target-recall').textContent = value(q.target_recall);
   el('p-depth').textContent = compact(q.depth);
-  const hits = q.curve_recall.map((_, i) => `at least ${i + 1} hits`);
+  const label = (x) => (x === 0 ? 'no floor' : `${x} bits`);
   const traces = [{
-    x: q.curve_recall, y: q.curve_precision, text: hits, name: 'By hits needed', mode: 'lines+markers', line: { color: '#1f6fb2' },
+    x: q.curve_recall, y: q.curve_precision, text: q.floors.map(label), name: 'By floor', mode: 'lines+markers', line: { color: '#1f6fb2' },
     hovertemplate: 'recall %{x:.3f}, precision %{y:.3f}, %{text}<extra></extra>',
-  }];
-  if (!q.over_limit && q.precision !== null) {
-    traces.push({ x: [q.recall], y: [q.precision], name: 'This floor', mode: 'markers', marker: { color: '#c0392b', size: 11 } });
-  }
+  }, { x: [q.recall], y: [q.precision], name: 'This floor', mode: 'markers', marker: { color: '#c0392b', size: 11 } }];
   Plotly.react('plot-pr', traces, {
     ...LAYOUT,
     uirevision: 1,
@@ -102,6 +104,24 @@ function drawPrecision(q, p) {
     xaxis: { ...AXIS, title: { text: 'Recall per read' }, range: [0, 1] },
     yaxis: { ...AXIS, title: { text: 'Precision per read' }, range: [0, 1] },
   }, CONFIG);
+  const floorX = q.floors.map((x) => (x === 0 ? NO_FLOOR_X : x));
+  const axis = {
+    ...AXIS, type: 'log', title: { text: 'Information bit floor' }, tickmode: 'array',
+    tickvals: [NO_FLOOR_X, 5, 10, 20, 40, 80, 160], ticktext: ['none', '5', '10', '20', '40', '80', '160'],
+  };
+  const ks = Object.keys(q.by_k).map(Number).sort((a, b) => a - b);
+  for (const [id, key, title] of [['plot-floor-precision', 'precision', 'Precision by floor'], ['plot-floor-recall', 'recall', 'Recall by floor']]) {
+    Plotly.react(id, ks.map((k) => ({
+      x: floorX, y: q.by_k[k][key], name: `k ${k}`, mode: 'lines+markers', marker: { size: 4 }, line: { width: k === p.k ? 3.5 : 1.25 },
+      text: q.floors.map(label), hovertemplate: `k ${k}, %{text}: %{y:.3f}<extra></extra>`,
+    })), {
+      ...LAYOUT,
+      uirevision: 1,
+      title: { text: `${title} (1 in ${p.m})`, font: { size: 14 } },
+      xaxis: axis,
+      yaxis: { ...AXIS, title: { text: title.split(' ')[0] }, range: [0, 1] },
+    }, CONFIG);
+  }
 }
 
 function draw(r, p) {

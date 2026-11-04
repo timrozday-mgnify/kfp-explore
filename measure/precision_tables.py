@@ -27,11 +27,14 @@ NO_RELATIVE = len(sg.BINS) - 1  # the identity bin of queries with no relative a
 X_EDGES = np.array([0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.01])
 TRUE_BAND, UNKNOWN_BAND = -1, len(X_EDGES) - 1  # a row's relative-identity band, or these
 ALIGN_FROM_K = 7  # below this, too many rows to align: their identity stays unknown
-LEVELS_MAX = 8  # real sampling is recorded for m = 1 to 128
+LEVELS_MAX = 14  # real sampling is recorded for m = 1 to 8,192
+sg.LEVELS = LEVELS_MAX
 HITS = (1, 2, 3, 5)
 SALTS = 8
 FLOORS = (0, 5, 10, 20, 30, 40, 60, 80, 120, 160, 200)  # information bits; 0 is no floor
 N_BANDS = len(X_EDGES) + 1  # the true group first, then relative identity bands, then unknown
+TRANSLATED_FRAMES = 6  # kfp's charge counts every frame's windows, about 9 bits per read pair
+MARGINS = (0, 3, 10)  # best-group rule: bits below a read's top score still kept (kfp's default is 3)
 MAX_RSS_GB = 8
 
 
@@ -50,7 +53,7 @@ def key_bits(index, k, seqs):
 
 
 def rows_for(mates, k, index, salt=0, bits=None):
-    """(pair, group, per-level distinct hit counts [rows x 8]) of each read pair on each group, and
+    """(pair, group, per-level distinct hit counts [rows x levels]) of each read pair on each group, and
     with ``bits`` the same levels' summed key bits."""
     encoded = sg.code(mates)
     x, at = sg.analyse.kmers(encoded, k)
@@ -68,21 +71,27 @@ def rows_for(mates, k, index, salt=0, bits=None):
     rows = np.repeat(first[pos], n) + (np.arange(n.sum()) - np.repeat(np.cumsum(n) - n, n))
     scale = int(group.max()) + 2
     uniq, inverse = np.unique(np.repeat(owner, n) * scale + group[rows], return_inverse=True)
-    table = np.zeros((len(uniq), 8), np.int32)
+    table = np.zeros((len(uniq), LEVELS_MAX), np.int32)
     np.add.at(table, (inverse, np.repeat(lv, n)), 1)
     counts_up = table[:, ::-1].cumsum(1)[:, ::-1]
     if bits is None:
         return uniq // scale, uniq % scale, counts_up
-    summed = np.zeros((len(uniq), 8))
+    summed = np.zeros((len(uniq), LEVELS_MAX))
     np.add.at(summed, (inverse, np.repeat(lv, n)), np.repeat(bits[pos], n))
     return uniq // scale, uniq % scale, counts_up, summed[:, ::-1].cumsum(1)[:, ::-1]
 
 
-def passing(levels, summed, level, floor, charge):
-    """Rows with a hit whose score, summed bits less the charge per hit after the first, meets floor."""
+def scores(levels, summed, level, charge):
+    """kfp's evidence: summed bits less the charge per hit after the first; rows with no hit -inf."""
     hits = levels[:, level]
-    score = summed[:, level] - np.maximum(hits - 1, 0) * charge
-    return (hits > 0) & (score >= floor)
+    return np.where(hits > 0, summed[:, level] - np.maximum(hits - 1, 0) * charge, -np.inf)
+
+
+def top_of_pair(pair, score):
+    """Each row's read pair's top score. Rows are sorted by pair."""
+    starts = np.flatnonzero(np.r_[True, pair[1:] != pair[:-1]])
+    tops = np.maximum.reduceat(score, starts)
+    return np.repeat(tops, np.diff(np.r_[starts, len(pair)]))
 
 
 def per_target(pair, group, true, on, pair_q, n_queries):
@@ -148,7 +157,7 @@ def main():
         "source": a.members, "groups": n_g, "pairs": n_pairs, "pairs_per_query": a.pairs, "mate": sg.MATE,
         "seed": a.seed, "identity_bins": sg.BINS.tolist(), "x_edges": X_EDGES.tolist(),
         "pairs_by_bin": pairs_by_bin.tolist(), "queries_by_bin": queries_by_bin.tolist(), "k": {},
-        "floors": list(FLOORS), "salts": SALTS, "n_bands": N_BANDS,
+        "floors": list(FLOORS), "salts": SALTS, "n_bands": N_BANDS, "margins": list(MARGINS),
     }
     for k in map(int, a.ks.split(",")):
         t0 = time.perf_counter()
@@ -208,11 +217,13 @@ def main():
         # One index is one hash draw: the spread of precision over salts.
         spread, salted = {}, {}
         bits = key_bits(idx, k, index)
-        charge = float(np.log2(2 * (sg.MATE - k + 1)))
+        charge = float(np.log2(2 * TRANSLATED_FRAMES * (sg.MATE - k + 1)))
         band_at = np.where(band == TRUE_BAND, 0, band + 1)
         cell = pair_bin[pair] * N_BANDS + band_at
         n_bins, n_levels, n_floors = NO_RELATIVE + 1, LEVELS_MAX, len(FLOORS)
         cube = np.zeros((n_levels, n_floors, n_bins * N_BANDS), np.int64)
+        best_cube = np.zeros((len(MARGINS), n_levels, n_floors, n_bins * N_BANDS), np.int64)
+        hit_bits = np.zeros((n_levels, 2))
         query_pass = np.zeros((n_levels, n_floors, n_bins, a.pairs + 1), np.int64)
         decoy_pass = np.zeros((n_levels, n_floors), np.int64)
         floor_precision = np.zeros((SALTS, n_levels, n_floors))
@@ -225,13 +236,20 @@ def main():
             rel = relative[pa]
             dp, _, dl, ds = rows_for(decoys, k, idx, salt=salt * 0x51ED27, bits=bits)
             for level in range(n_levels):
+                score = scores(lv, summed, level, charge)
+                decoy_score = scores(dl, ds, level, charge)
+                top = top_of_pair(pa, score)
+                hit_bits[level] += [summed[:, level][tr].sum(), lv[:, level][tr].sum()]
                 for f, floor in enumerate(FLOORS):
-                    on = passing(lv, summed, level, floor, charge)
+                    on = score >= floor
                     cube[level, f] += np.bincount(cell[on], minlength=n_bins * N_BANDS)
+                    for g, margin in enumerate(MARGINS):
+                        kept = on & (score >= top - margin)
+                        best_cube[g, level, f] += np.bincount(cell[kept], minlength=n_bins * N_BANDS)
                     floor_precision[salt - 1, level, f] = (on & tr).sum() / max(on.sum(), 1)
                     true_pairs = np.bincount(query_of_pair[pa[on & tr]], minlength=len(chosen))
                     np.add.at(query_pass[level, f], (bin_of_query, true_pairs), 1)
-                    decoy_pass[level, f] += passing(dl, ds, level, floor, charge).sum()
+                    decoy_pass[level, f] += (decoy_score >= floor).sum()
             for level in range(LEVELS_MAX):
                 for h in HITS:
                     on = lv[:, level] >= h
@@ -248,6 +266,8 @@ def main():
             "key_bits": [float(bits.mean()), *map(float, np.quantile(bits, [0.05, 0.95]))],
             "charge": charge,
             "floor_cube": cube.tolist(),
+            "best_cube": best_cube.tolist(),
+            "bits_per_true_hit": (hit_bits[:, 0] / np.maximum(hit_bits[:, 1], 1)).round(2).tolist(),
             "floor_query_pass": query_pass.tolist(),
             "floor_decoys": decoy_pass.tolist(),
             "floor_precision_sd": (floor_precision.std(0) / np.maximum(floor_precision.mean(0), 1e-9)).round(3).tolist(),

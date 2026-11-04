@@ -1,11 +1,10 @@
-"""Precision from shared k-mer tables against held-out simulation (docs/plan.md, phase 4).
+"""Precision tables against held-out simulation and kfp's own measurements (docs/plan.md, phase 4).
 
-Tables come from one set of queries; real hash sampling comes from different queries, averaged over
-hash salts, as the tables give an expectation over hashes. Unsalted, every run is the same hash draw.
+Tables come from one set of queries; the held-out run uses different queries. Both are means over hash
+salts. kfp's numbers are from docs/tree-index-plan.md and the HPC runs' indexes.
 
 Run: uv run --no-project --with numpy python checks/test_tables.py"""
 
-import json
 import sys
 from pathlib import Path
 
@@ -15,86 +14,130 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "web"))
 import model  # noqa: E402
 
-HITS = (1, 2, 3, 5)
 COMMON = 1.0  # others per pair above which a setting is compared closely
+FLOORS = [0, 5, 10, 20, 30, 40, 60, 80, 120, 160, 200]
+LEVELS = (0, 3, 5, 7)
+
+
+def rates(entry, t, level, truth, weights, rule=None):
+    true_hits, ok, wrong = model.floor_rates(entry, t, level, truth, weights, rule)
+    return true_hits, ok, wrong
+
+
+def held_out(t, held):
+    pairs = np.array(held["pairs_by_bin"], float)
+    all_reads = pairs / pairs.sum()
+    relatives = np.r_[pairs[:-1] / pairs[:-1].sum(), 0]
+    for rule, name in ((None, "every group over the floor"), (1, "best group within 3 bits")):
+        errors = {"recall": [], "others": [], "precision": [], "precision_70": []}
+        print(f"\nHeld-out, {name}: floor: recall held / table; others; precision; precision at x >= 0.7")
+        for k in sorted(held["k"], key=int):
+            a, b = t["k"][k], held["k"][k]
+            for level in LEVELS:
+                for f, floor in enumerate(FLOORS):
+                    seen, tab = [rates(e, x, level, 2, relatives, rule) for e, x in ((b, held), (a, t))]
+                    recall, others = (seen[0][f], tab[0][f]), (seen[2][f], tab[2][f])
+                    p = [rates(e, x, level, 2, all_reads, rule) for e, x in ((b, held), (a, t))]
+                    precision = [q[0][f] / max(q[0][f] + q[2][f], 1e-12) for q in p]
+                    p70 = [rates(e, x, level, 0.7, all_reads, rule) for e, x in ((b, held), (a, t))]
+                    lenient = [(q[0][f] + q[1][f]) / max(q[0][f] + q[1][f] + q[2][f], 1e-12) for q in p70]
+                    errors["recall"].append(tab[0][f] - seen[0][f])
+                    if seen[2][f] >= (COMMON if rule is None else 0.2) and seen[0][f] > 0.05:
+                        errors["others"].append(np.log(others[1] / others[0]))
+                        errors["precision"].append(np.log(precision[1] / precision[0]))
+                        errors["precision_70"].append(np.log(lenient[1] / lenient[0]))
+                    if level == 3 and floor in (0, 20, 40, 80, 120):
+                        print(f"  k{k} m8 {floor:3d}: {recall[0]:.3f} / {recall[1]:.3f}; {others[0]:6.2f} / {others[1]:6.2f}; "
+                              f"{precision[0]:.3f} / {precision[1]:.3f}; {lenient[0]:.3f} / {lenient[1]:.3f}")
+        summary = {key: float(np.sqrt(np.mean(np.square(v)))) for key, v in errors.items()}
+        print(f" rmse: recall {summary['recall']:.4f}; log ratio, {len(errors['others'])} common settings:",
+              {key: round(summary[key], 3) for key in ("others", "precision", "precision_70")})
+        assert summary["recall"] < 0.02
+        assert summary["others"] < 0.2 and summary["precision"] < 0.25 and summary["precision_70"] < 0.1
+
+
+def per_target(t, held):
+    depth = held["pairs_per_query"]
+    queries = np.array(held["queries_by_bin"], float)
+    weights = queries / queries.sum()
+    errors = []
+    print(f"\nPer target at depth {depth}, no floor: true called, one hash draw / table; false groups")
+    for k in sorted(held["k"], key=int):
+        entry = t["k"][k]
+        for level, h in [(3, 1), (5, 1)]:
+            r = held["k"][k]["real"][f"{level},{h}"]
+            called, _, wrong = model.target_rates(entry, t, level, 0, 2, weights, depth)
+            print(f"  k{k} m{2**level}: {r['target_true']:.3f} / {called:.3f}; {r['target_false']:.1f} / {wrong:.1f}")
+            errors.append(called - r["target_true"])
+    print(f" rmse called {np.sqrt(np.mean(np.square(errors))):.3f}")
+    assert np.sqrt(np.mean(np.square(errors))) < 0.08
+
+
+def against_kfp(t, slice_t):
+    print("\nAgainst kfp's measurements, nothing fitted")
+    # Score per hit at k 5: kfp's fit is 9 + 8 per hit (wide k 5, 1 key per ~12 residues).
+    e = t["k"]["5"]
+    bits = np.mean(e["bits_per_true_hit"][3:5])
+    print(f" k5 score: {e['charge']:.1f} + {bits - e['charge']:.1f} per hit; kfp 9 + 8")
+    assert abs(e["charge"] - 8.9) < 0.5 and abs(bits - e["charge"] - 8) < 1.5
+    # Mean key bits: kfp's slice index, k 7 and k 11 keys, against 1/16 of the same slice.
+    for k, seen in (("7", 29.1), ("11", 45.4)):
+        got = slice_t["k"][k]["key_bits"][0]
+        print(f" k{k} mean key bits: {got:.1f}; kfp {seen}")
+        assert abs(got - seen) < 1.5
+    # Decoys at k 5: kfp's 261,591 read pairs give 23,364 / 1,947 leaves at 30 / 40 bits, on one
+    # index with one key per ~12 residues (between m 8 and 16), counting all frames.
+    for floor, seen in ((30, 23364 / 261591), (40, 1947 / 261591)):
+        f = FLOORS.index(floor)
+        low, high = [e["floor_decoys"][level, f] * model.FRAMES for level in (4, 3)]
+        print(f" k5 decoys per pair at {floor} bits: {low:.4f} to {high:.4f} (m 16 to 8); kfp {seen:.4f}")
+        assert low / 5 < seen < high * 5
+    # True group over a high bar: kfp's confident reads at 90.5 bits, by identity.
+    bins = [8, 7, 6, 4, 2]  # identity 0.98+, 0.95, 0.9, 0.8, 0.7
+    seen = [0.77, 0.46, 0.29, 0.13, 0.02]
+    pairs = np.array(t["pairs_by_bin"], float)
+    for level in (3, 4):
+        at_80, at_120 = [
+            e["floor_cube"][level, FLOORS.index(floor), bins, 0] / pairs[bins] for floor in (80, 120)
+        ]
+        print(f" k5 m{2**level} true group at 120 to 80 bits: {at_120.round(2).tolist()} to {at_80.round(2).tolist()}; kfp at 90.5: {seen}")
 
 
 def main():
     for name in ("mini-slice", "slice"):
         model.load_table(name, (ROOT / f"web/data/tables-{name}.json").read_text())
-    assert model.tail_table(3, 2, 2)[3, 0] == 1 - 0.5**3
-    assert abs(model.tail_table(3, 2, 2)[3, 1] - 0.5) < 1e-12
-    assert model.floor_hits(0, 9) == 1 and model.floor_hits(40, 9) == 2
-    assert model.floor_hits(50, 1) == model.HIT_LIMIT + 1  # 1-mers carry too little to add up
+    model.load_table("held", (ROOT / "checks/data/heldout-mini-slice.json").read_text())
+    t, held = model.TABLES["mini-slice"], model.TABLES["held"]
 
-    t = model.TABLES["mini-slice"]
-    held = json.loads((ROOT / "checks/data/heldout-mini-slice.json").read_text())
-    pairs = np.array(held["pairs_by_bin"], float)
-    all_reads = pairs / pairs.sum()
-    relatives = np.r_[pairs[:-1] / pairs[:-1].sum(), 0]
-    errors = {"recall": [], "others": [], "precision": [], "precision_70": [], "target": []}
-    for k in sorted(held["k"], key=int):
-        entry = t["k"][k]
-        real = held["k"][k]["real"]
-        print(f"k{k}: level, h: recall held-out / table; others; precision; precision at x >= 0.7 (one draw)")
-        for level in (0, 3, 5, 7):
-            m = 2**level
-            with_all = model.table_rates(entry, t, m, 5, 2, all_reads)
-            lenient = model.table_rates(entry, t, m, 5, 0.7, all_reads)
-            with_rel = model.table_rates(entry, t, m, 5, 2, relatives)
-            for h in HITS:
-                r = real[f"{level},{h}"]
-                s_recall, s_others, s_true, s_all = held["k"][k]["salted"][f"{level},{h}"]
-                s_precision = s_true / max(s_all, 1e-12)
-                recall = with_rel[0][h - 1]
-                others = with_rel[2][h - 1]
-                tp, wrong = with_all[0][h - 1], with_all[2][h - 1]
-                precision = tp / max(tp + wrong, 1e-12)
-                ok = lenient[0][h - 1] + lenient[1][h - 1]
-                p70 = ok / max(ok + lenient[2][h - 1], 1e-12)
-                print(f"  m{m:<4d} h{h}: {s_recall:.3f} / {recall:.3f}; {s_others:.2f} / {others:.2f}; "
-                      f"{s_precision:.3f} / {precision:.3f}; {r['precision_70']:.3f} / {p70:.3f}")
-                errors["recall"].append(recall - s_recall)
-                if s_others >= COMMON:
-                    errors["others"].append(np.log(others / s_others))
-                    errors["precision"].append(np.log(precision / s_precision))
-                    errors["precision_70"].append(np.log(p70 / r["precision_70"]))
-    summary = {key: float(np.sqrt(np.mean(np.square(v)))) for key, v in errors.items() if v}
-    print("rmse: recall", round(summary["recall"], 4), "; log ratio, common settings:",
-          {key: round(summary[key], 3) for key in ("others", "precision", "precision_70")})
-    assert summary["recall"] < 0.02
-    assert summary["others"] < 0.2 and summary["precision"] < 0.25 and summary["precision_70"] < 0.1
+    # Rules on the same reads: best-group sets are subsets, tighter margins are smaller.
+    for k, e in t["k"].items():
+        all_rows = e["floor_cube"].sum((2, 3))
+        by_margin = e["best_cube"].sum((3, 4))
+        assert (by_margin[0] <= by_margin[1]).all() and (by_margin[1] <= by_margin[2]).all(), k
+        assert (by_margin[2] <= all_rows).all(), k
+        # A higher floor keeps fewer rows, and no floor keeps every hit.
+        assert (np.diff(all_rows, axis=1) <= 0).all(), k
 
-    # Per target, at the held-out run's depth, with every query counted once.
-    depth = held["pairs_per_query"]
-    queries = np.array(held["queries_by_bin"], float)
-    weights = queries / queries.sum()
-    target = []
-    print(f"per target at depth {depth}: true called real / table; false groups")
-    for k in sorted(held["k"], key=int):
-        entry = t["k"][k]
-        for level, h in [(3, 1), (3, 3), (5, 1), (5, 2)]:
-            r = held["k"][k]["real"][f"{level},{h}"]
-            called, ok, wrong = model.target_rates(entry, t, 2**level, h, 2, weights, depth)
-            print(f"  k{k} m{2**level} h{h}: {r['target_true']:.3f} / {called:.3f}; {r['target_false']:.1f} / {wrong:.1f}")
-            target.append((called - r["target_true"], np.log(max(wrong, 1e-9) / max(r["target_false"], 1e-9))))
-    target = np.array(target)
-    print(f"rmse: called {np.sqrt(np.mean(target[:, 0] ** 2)):.3f}, false groups log ratio {np.sqrt(np.mean(target[:, 1] ** 2)):.3f}")
-    assert np.sqrt(np.mean(target[:, 0] ** 2)) < 0.08
+    held_out(t, held)
+    per_target(t, held)
+    against_kfp(t, model.TABLES["slice"])
 
     params = {
         "index": "mini-slice", "k": 9, "m": 8, "floor": 0, "truth": 0.7, "mix": "natural", "no_relative": 0.05,
-        "reads": 1e7, "targets": 1e4,
+        "reads": 1e7, "targets": 1e4, "margin": -1,
     }
     q = model.compute_precision(params)
-    assert q["available"] and 0 < q["precision"] < 1 and 0 < q["auprc"] <= 1 and q["hits_needed"] == 1
+    assert q["available"] and 0 < q["precision"] < 1 and 0 < q["auprc"] <= 1
     assert not model.compute_precision(params | {"k": 10})["available"]
-    high = model.compute_precision(params | {"floor": 100})
-    assert high["hits_needed"] > 1 and high["recall"] < q["recall"] and high["precision"] > q["precision"]
-    over = model.compute_precision(params | {"k": 5, "floor": 200})
-    assert over["over_limit"] and over["recall"] == 0 and over["precision"] is None
-    all_novel = model.compute_precision(params | {"no_relative": 0.9, "truth": 2})
-    assert all_novel["precision"] < q["precision"]
+    high = model.compute_precision(params | {"floor": 7})
+    assert high["recall"] < q["recall"] and high["precision"] > q["precision"]
+    best = model.compute_precision(params | {"margin": 3})
+    assert best["precision"] > q["precision"] and best["recall"] <= q["recall"]
+    assert model.compute_precision(params | {"m": 8192})["available"]
+    k9, low = t["k"]["9"]["floor_cube"][3], [0, 1, 2]
+    assert (k9[low] == k9[0]).all()  # floors under a k 9 key's bits change nothing
+    novel = model.compute_precision(params | {"no_relative": 0.9, "truth": 2})
+    assert novel["precision"] < q["precision"]
     print("ok")
 
 

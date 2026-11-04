@@ -224,138 +224,123 @@ TABLES = {}
 NATURAL_MIX = [0.05, 0.01, 0.01, 0.01, 0.01, 0.01, 0.05, 0.05, 0.8]  # kfp's nearest relatives, full mini-slice
 CHANCE_GROWTH = 0.6  # distinct chance groups grow as reads^this (kfp: 0.5-0.7)
 CHANCE_FROM_READS = 261_591  # the read pairs that exponent starts from in kfp's test
-HIT_LIMIT = 12
+WRONG_FRAMES = 2  # protein reads are in frame; real reads also meet chance in 2 more (FRAMES in all)
 
 
 def load_table(name, text):
-    """Cells as arrays: identity bin, band (-1 true group, the last unknown identity), M, count."""
+    """Arrays for one index. Cubes are by level, floor, identity bin and band; band 0 is the true
+    group, then relative identity bands, then unknown identity. Best-group cubes add a margin first."""
     t = json.loads(text)
+    bins, bands = len(t["pairs_by_bin"]), t["n_bands"]
     for entry in t["k"].values():
         entry["cells"] = np.array(entry["cells"], float).reshape(-1, 4)
         entry["decoy"] = np.array(entry["decoy"], float).reshape(-1, 2)
-        entry["true_by_query"] = np.array(entry["true_by_query"], int)
+        cube = np.array(entry["floor_cube"], float) / t["salts"]
+        entry["floor_cube"] = cube.reshape(*cube.shape[:2], bins, bands)
+        best = np.array(entry["best_cube"], float) / t["salts"]
+        entry["best_cube"] = best.reshape(*best.shape[:3], bins, bands)
+        entry["floor_query_pass"] = np.array(entry["floor_query_pass"], float) / t["salts"]
+        entry["floor_decoys"] = np.array(entry["floor_decoys"], float) / t["salts"] / t["pairs"]
+        entry["floor_precision_sd"] = np.array(entry["floor_precision_sd"])
+        entry["floor_rows"] = np.array(entry["floor_rows"], float).reshape(bins, bands)
     TABLES[name] = t
 
 
-def tail_table(top, m, hits):
-    """P(Binomial(M, 1/m) >= h) for M = 0..top, h = 1..hits: rows M, columns h - 1."""
-    p = 1 / m
-    pmf = np.zeros((top + 1, hits + 1))  # P(exactly j hits), the last column holding >= hits
-    pmf[0, 0] = 1
-    for c in range(1, top + 1):
-        pmf[c, 0] = pmf[c - 1, 0] * (1 - p)
-        pmf[c, 1:] = pmf[c - 1, 1:] * (1 - p) + pmf[c - 1, :-1] * p
-        pmf[c, -1] += pmf[c - 1, -1] * p
-    return pmf[:, ::-1].cumsum(1)[:, ::-1][:, 1:]
+def correct_bands(t, truth):
+    """Which bands count as correct other than the true group: relatives at identity >= truth."""
+    edges = np.array(t["x_edges"][:-1])
+    return np.r_[False, edges >= truth, False]
 
 
-def floor_hits(floor, k, length=50, bits_per_letter=-np.log2(S2)):
-    """Fewest hits scoring >= floor: h bits - (h - 1) log2(windows), kfp's evidence with one key size."""
-    bits = k * bits_per_letter
-    charge = np.log2(2 * max(length - k + 1, 1))
-    if floor <= bits:
-        return 1
-    if bits <= charge:
-        return HIT_LIMIT + 1  # further hits add nothing
-    return int(np.ceil((floor - charge) / (bits - charge)))
+def floor_rates(entry, t, level, truth, weights, rule=None):
+    """Per read pair, per floor: (true hits, other correct hits, wrong hits). ``rule``: a margin's
+    index for the best-group rule, or None for every group over the floor."""
+    cube = entry["floor_cube"][level] if rule is None else entry["best_cube"][rule, level]
+    pairs = np.maximum(np.array(t["pairs_by_bin"], float), 1)
+    per_band = (cube * (np.asarray(weights) / pairs)[None, :, None]).sum(1)
+    ok = correct_bands(t, truth)
+    return per_band[:, 0], per_band[:, ok].sum(1), per_band[:, 1:][:, ~ok[1:]].sum(1)
 
 
-def table_rates(entry, t, m, hits, truth, weights):
-    """Per read pair, by hit threshold 1..hits: (true hits, other correct hits, wrong hits, decoys)."""
-    cells = entry["cells"]
-    top = int(max(cells[:, 2].max(), entry["decoy"][:, 0].max() if len(entry["decoy"]) else 0))
-    tail = tail_table(top, m, hits)
-    pairs = np.array(t["pairs_by_bin"], float)
-    edges = np.array(t["x_edges"])
-    n_bands = len(edges) - 1
-    by = cells[:, 0].astype(int)
-    band = cells[:, 1].astype(int)
-    rate = (cells[:, 3] / np.maximum(pairs[by], 1) * np.asarray(weights)[by])[:, None] * tail[cells[:, 2].astype(int)]
-    is_true = band == -1
-    lenient = (band >= 0) & (band < n_bands) & (edges[np.minimum(band, n_bands - 1)] >= truth)
-    true_hits = rate[is_true].sum(0)
-    other_ok = rate[lenient].sum(0)
-    wrong = rate[~is_true & ~lenient].sum(0)
-    decoys = (entry["decoy"][:, 1, None] / t["pairs"] * tail[entry["decoy"][:, 0].astype(int)]).sum(0)
-    return true_hits, other_ok, wrong, decoys
-
-
-def target_rates(entry, t, m, h, truth, weights, depth):
-    """Per target at ``depth`` read pairs each: (targets called, other correct groups, wrong groups).
-
-    A group is called by any read pair. The true group's rate is each query's own, as a target's reads
-    share its conservation; a relative's read pairs are taken as independent. Tested at depth 6."""
-    cells = entry["cells"]
-    tail = tail_table(int(cells[:, 2].max()), m, h)[:, h - 1]
-    pairs = np.array(t["pairs_by_bin"], float)
-    edges = np.array(t["x_edges"])
-    n_bands = len(edges) - 1
-    by = cells[:, 0].astype(int)
-    band = cells[:, 1].astype(int)
-    per_pair = cells[:, 3] / np.maximum(pairs[by], 1) * np.asarray(weights)[by]
-    call = tail[cells[:, 2].astype(int)]
-    is_true = band == -1
-    lenient = (band >= 0) & (band < n_bands) & (edges[np.minimum(band, n_bands - 1)] >= truth)
+def target_rates(entry, t, level, f, truth, weights, depth):
+    """Per target at ``depth`` read pairs each, at one floor: (targets called, other correct groups,
+    wrong groups). A group is called by any read pair. The true group's rate is each query's own, as
+    a target's reads share its conservation; a relative's read pairs are taken as independent."""
     weight = np.asarray(weights, float)
-    queries = entry["true_by_query"]
-    rate = tail[np.minimum(queries[:, 1:], len(tail) - 1)].mean(1)
-    called_query = 1 - (1 - rate) ** depth
-    n_by_bin = np.bincount(queries[:, 0], minlength=len(pairs))
-    called = (weight * np.bincount(queries[:, 0], called_query, len(pairs)) / np.maximum(n_by_bin, 1)).sum()
-    # A relative's cell: such a relative appears at this rate per pair, and is called per read pair.
-    called_other = per_pair * (1 - (1 - call) ** depth)
-    return float(called), float(called_other[lenient].sum()), float(called_other[~is_true & ~lenient].sum())
+    counts = entry["floor_query_pass"][level, f]  # queries by bin and read pairs passing
+    n_pairs = counts.shape[1] - 1
+    rate = np.arange(n_pairs + 1) / n_pairs
+    by_bin = (counts * (1 - (1 - rate) ** depth)).sum(1) / np.maximum(counts.sum(1), 1e-12)
+    called = float((weight * by_bin).sum())
+    rows = np.maximum(entry["floor_rows"], 1)  # (read pair, group) rows sharing any k-mer
+    hit = entry["floor_cube"][level, f] / rows
+    pairs = np.maximum(np.array(t["pairs_by_bin"], float), 1)
+    groups = entry["floor_rows"] * (weight / pairs)[:, None]  # such groups per read pair
+    called_band = (groups * (1 - (1 - np.minimum(hit, 1)) ** depth)).sum(0)
+    ok = correct_bands(t, truth)
+    return called, float(called_band[ok].sum()), float(called_band[1:][~ok[1:]].sum())
 
 
 def compute_precision(a):
-    """The precision panel, from one index's tables."""
+    """The precision panel, from one index's tables: every floor, at the selected rule."""
     t = TABLES[a["index"]]
     k, m = str(a["k"]), a["m"]
     if k not in t["k"]:
-        return {"available": False, "ks": sorted(map(int, t["k"]))}
+        return {"available": False, "reason": "k", "ks": sorted(map(int, t["k"]))}
+    level = int(round(np.log2(m)))
     entry = t["k"][k]
+    floors = t["floors"]
+    f = int(a["floor"])
     n_bins = len(t["pairs_by_bin"])
     mix = np.array(NATURAL_MIX if a["mix"] == "natural" else [1.0] * (n_bins - 1), float)
     weights = np.r_[mix / mix.sum() * (1 - a["no_relative"]), a["no_relative"]]
     truth = a["truth"]
-    hits = HIT_LIMIT
-    true_hits, other_ok, wrong, decoys = table_rates(entry, t, m, hits, truth, weights)
-    correct = true_hits + other_ok
-    precision = correct / np.maximum(correct + wrong, 1e-12)
-    # True hits among reads with a relative only, for recall of those reads.
-    recall = true_hits / max(1 - a["no_relative"], 1e-12)
-    h = floor_hits(a["floor"], a["k"])
-    at = min(h, hits) - 1
-    # AUPRC by thresholds, from recall 0 up: each step's precision over its gain in recall.
+    margin = a.get("margin", -1)
+    rule = t["margins"].index(margin) if margin in t["margins"] else None
+
+    def evaluate(e):
+        true_hits, other_ok, wrong = floor_rates(e, t, level, truth, weights, rule)
+        wrong = wrong + e["floor_decoys"][level] * WRONG_FRAMES
+        correct = true_hits + other_ok
+        precision = correct / np.maximum(correct + wrong, 1e-12)
+        recall = true_hits / max(1 - a["no_relative"], 1e-12)
+        return recall, precision, wrong + other_ok
+
+    recall, precision, others = evaluate(entry)
+    # AUPRC by floors, from recall 0 up: each step's precision over its gain in recall.
     r, q = recall[::-1], precision[::-1]
-    gains = np.diff(np.r_[0, r])
-    auprc = float((gains * q).sum() / max(r[-1], 1e-12))
-    level = np.log2(m)
-    sd = entry["precision_sd"].get(f"{int(level)},{h}") if truth >= 1 and level == int(level) else None
+    auprc = float((np.diff(np.r_[0, np.maximum.accumulate(r)]) * q).sum() / max(r.max(), 1e-12))
+    by_k = {}
+    for other_k, e in t["k"].items():
+        ri, pi, _ = evaluate(e)
+        by_k[other_k] = {"recall": ri.tolist(), "precision": pi.tolist()}
     n_reads, targets = a["reads"], a["targets"]
     depth = n_reads / max(targets, 1)
-    called, called_ok, called_wrong = target_rates(entry, t, m, min(h, hits), truth, weights, depth)
-    per_read_chance = float(decoys[at])
+    called, called_ok, called_wrong = target_rates(entry, t, level, f, truth, weights, depth)
+    per_read_chance = float(entry["floor_decoys"][level, f]) * FRAMES
     from_reads = min(n_reads, CHANCE_FROM_READS)
     chance_groups = per_read_chance * from_reads * (n_reads / from_reads) ** CHANCE_GROWTH / max(targets, 1)
     called_correct = called + called_ok
+    sd = float(entry["floor_precision_sd"][level, f]) if rule is None and truth >= 1 else None
     return {
         "available": True,
-        "hits_needed": h,
-        "over_limit": h > hits,
-        "recall": float(recall[at]) if h <= hits else 0.0,
-        "precision": float(precision[at]) if h <= hits else None,
-        "others": float(wrong[at] + other_ok[at]),
+        "floors": floors,
+        "floor": floors[f],
+        "recall": float(recall[f]),
+        "precision": float(precision[f]),
+        "others": float(others[f]),
         "chance": per_read_chance,
         "auprc": auprc,
         "hash_sd": sd,
+        "key_bits": entry["key_bits"],
+        "bits_per_hit": entry["bits_per_true_hit"][level],
+        "charge": entry["charge"],
         "curve_recall": recall.tolist(),
         "curve_precision": precision.tolist(),
+        "by_k": by_k,
         "depth": depth,
         "target_recall": called / max(1 - a["no_relative"], 1e-12),
         "target_precision": called_correct / max(called_correct + called_wrong + chance_groups, 1e-12),
-        "target_wrong": called_wrong,
-        "target_chance": chance_groups,
     }
 
 
