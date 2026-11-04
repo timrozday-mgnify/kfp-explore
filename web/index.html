@@ -17,6 +17,11 @@
   #readouts b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
   #plots { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 8px; }
   #plots > div { height: 380px; }
+  #precision-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px 24px; }
+  #precision-plots { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 8px; }
+  #precision-plots > div { height: 360px; }
+  .readouts { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; margin: 8px 0; }
+  .readouts b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
   p.note { color: #666; max-width: 70em; }
   h2 { font-size: 16px; margin: 24px 0 8px; border-top: 1px solid #ddd; padding-top: 16px; }
   #analysis-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
@@ -64,6 +69,58 @@
 </div>
 <div id="plots"><div id="plot-identity"></div><div id="plot-m"></div></div>
 <p class="note" id="grid-note"></p>
+<h2>Precision, from shared k-mer tables</h2>
+<form id="precision-form">
+  <label>Index
+    <select id="index-set">
+      <option value="mini-slice">Mini-slice (38 k groups)</option>
+      <option value="slice">Tree-index slice, 1/16 (33 k groups)</option>
+    </select>
+  </label>
+  <label>Information bit floor <span id="floor-out"></span><input type="range" id="floor" min="0" max="200" step="1" value="0"></label>
+  <label>A hit is correct if
+    <select id="truth">
+      <option value="2">True group only</option>
+      <option value="0.9">Or a relative at ≥ 0.9 identity</option>
+      <option value="0.7">Or a relative at ≥ 0.7</option>
+      <option value="0.5">Or a relative at ≥ 0.5</option>
+    </select>
+  </label>
+  <label>Identity of reads to the index
+    <select id="mix">
+      <option value="natural">Natural (mostly near-identical)</option>
+      <option value="uniform">Uniform across identity</option>
+    </select>
+  </label>
+  <label>Reads with no relative <span id="no_relative-out"></span><input type="range" id="no_relative" min="0" max="0.9" step="0.01" value="0.05"></label>
+  <label>Read pairs in the sample <span id="reads-out"></span><input type="range" id="reads" min="3" max="10" step="0.1" value="7"></label>
+  <label>Targets present <span id="targets-out"></span><input type="range" id="targets" min="0" max="8" step="0.1" value="4"></label>
+</form>
+<div id="precision-unavailable" class="note" role="status" hidden></div>
+<div id="precision-results">
+  <div class="readouts">
+    <div>Precision per read<b id="p-precision">–</b></div>
+    <div>Recall per read<b id="p-recall">–</b></div>
+    <div>AUPRC<b id="p-auprc">–</b></div>
+    <div>Hits needed<b id="p-hits">–</b></div>
+    <div>Other groups per read<b id="p-others">–</b></div>
+    <div>Chance groups per read<b id="p-chance">–</b></div>
+    <div>Precision per target<b id="p-target-precision">–</b></div>
+    <div>Recall per target<b id="p-target-recall">–</b></div>
+    <div>Depth, read pairs per target<b id="p-depth">–</b></div>
+  </div>
+  <div id="precision-plots"><div id="plot-pr"></div></div>
+</div>
+<p class="note">Measured on the selected index with k from the sliders above, at any sparsity: protein
+reads, pairs of 50 aa, with no translation or errors. Each k-mer a read shares with a group is kept at
+1 in m, so hits are binomial, which averages over hash functions; one index is one draw, shown as a
+range where measured. The floor uses kfp's evidence with one size of key. These indexes are one
+representative per MGnify90 unit and denser than the release, so values do not carry over to it.
+At k 5 and 6, relatives' identities are mostly unknown and count as wrong, so "or a relative" reads low.
+The bit floor is not yet calibrated to kfp's scores, whose bits vary by key. Per-target values take even
+abundance and were tested only at depth 6, where recall per target is up to 0.14 too high at 1 in 32;
+expect worse at greater depth, as reads of one target share k-mers. Chance is small here but grows with
+the index. Assignment to the best group is not modelled here.</p>
 <p class="note">Model: k-mer anchors on group representatives, with conserved and variable blocks
 fitted to kfp's 90%-AAI table (recall ceiling 0.96), and a conservation rate shared by each read
 fitted to the simulation. Index size assumes 225 residues per

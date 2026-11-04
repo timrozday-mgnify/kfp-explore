@@ -1,17 +1,19 @@
-"""Can precision come from shared k-mer counts? (docs/plan.md, Progress log.)
+"""Shared k-mer tables for the page's precision (docs/plan.md, phase 4).
 
 M = distinct k-mers a read pair shares with a group at full density. Sampling keeps each at 1/m, so
-hits ~ Binomial(M, 1/m) for any m. Compares that with real hash sampling on the same reads, for
-counts, hit thresholds, truth levels and best-group assignment, and tests how few reads are enough.
+hits ~ Binomial(M, 1/m) for any m. Writes M's counts by (query identity bin, relative identity band or
+truth) per k, on reads and reversed decoys, with real hash sampling and its spread alongside to test
+them. Queries with no relative at cover 0.8 form their own bin.
 
 Run from kfp's checkout, one job with capped threads:
-RAYON_NUM_THREADS=2 POLARS_MAX_THREADS=2 uv run --no-sync python <this file> members.parquet
+RAYON_NUM_THREADS=2 POLARS_MAX_THREADS=2 uv run --no-sync python <this file> members.parquet --out x.json
 """
 
 import argparse
+import json
 import resource
 import sys
-from math import comb
+import time
 from pathlib import Path
 
 import numpy as np
@@ -21,14 +23,35 @@ from kmer_functional_profiler import _core
 sys.path.insert(0, str(Path(__file__).parent))
 import sim_grid as sg  # noqa: E402
 
-KS = (7, 9, 11)
-LEVELS = (3, 5, 7)  # m = 8, 32, 128
+NO_RELATIVE = len(sg.BINS) - 1  # the identity bin of queries with no relative at cover 0.8
+X_EDGES = np.array([0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.01])
+TRUE_BAND, UNKNOWN_BAND = -1, len(X_EDGES) - 1  # a row's relative-identity band, or these
+ALIGN_FROM_K = 7  # below this, too many rows to align: their identity stays unknown
+LEVELS_MAX = 8  # real sampling is recorded for m = 1 to 128
 HITS = (1, 2, 3, 5)
 SALTS = 8
+FLOORS = (0, 5, 10, 20, 30, 40, 60, 80, 120, 160, 200)  # information bits; 0 is no floor
+N_BANDS = len(X_EDGES) + 1  # the true group first, then relative identity bands, then unknown
+MAX_RSS_GB = 8
 
 
-def rows_for(mates, k, index, salt=0):
-    """(pair, group, per-level distinct hit counts [rows x 8]) of each read pair on each group."""
+def key_bits(index, k, seqs):
+    """Each indexed k-mer's information, as kfp's keys: -log2 q0 - log2 g, at least 0, with q0 its
+    chance from residue composition and g the groups holding it."""
+    keys, _, holders, _ = index
+    letters = np.bincount(sg.code(seqs), minlength=20)[:20].astype(float)
+    log_f = np.log2(np.maximum(letters / letters.sum(), 1e-12))
+    bits = np.zeros(len(keys))
+    rest = keys.copy()
+    for _ in range(k):
+        bits -= log_f[rest % 21]
+        rest //= 21
+    return np.maximum(bits - np.log2(holders), 0)
+
+
+def rows_for(mates, k, index, salt=0, bits=None):
+    """(pair, group, per-level distinct hit counts [rows x 8]) of each read pair on each group, and
+    with ``bits`` the same levels' summed key bits."""
     encoded = sg.code(mates)
     x, at = sg.analyse.kmers(encoded, k)
     owner = (np.cumsum(encoded == sg.analyse.SEPARATOR)[at] // 2).astype(np.int64)
@@ -47,34 +70,39 @@ def rows_for(mates, k, index, salt=0):
     uniq, inverse = np.unique(np.repeat(owner, n) * scale + group[rows], return_inverse=True)
     table = np.zeros((len(uniq), 8), np.int32)
     np.add.at(table, (inverse, np.repeat(lv, n)), 1)
-    return uniq // scale, uniq % scale, table[:, ::-1].cumsum(1)[:, ::-1]
+    counts_up = table[:, ::-1].cumsum(1)[:, ::-1]
+    if bits is None:
+        return uniq // scale, uniq % scale, counts_up
+    summed = np.zeros((len(uniq), 8))
+    np.add.at(summed, (inverse, np.repeat(lv, n)), np.repeat(bits[pos], n))
+    return uniq // scale, uniq % scale, counts_up, summed[:, ::-1].cumsum(1)[:, ::-1]
 
 
-def at_least(counts, m, h):
-    """P(Binomial(counts, 1/m) >= h), for an integer array of counts."""
-    top = int(counts.max()) if len(counts) else 0
-    table = np.zeros(top + 1)
-    p = 1 / m
-    for c in range(top + 1):
-        table[c] = 1 - sum(comb(c, i) * p**i * (1 - p) ** (c - i) for i in range(min(h, c + 1)))
-    return table[counts]
+def passing(levels, summed, level, floor, charge):
+    """Rows with a hit whose score, summed bits less the charge per hit after the first, meets floor."""
+    hits = levels[:, level]
+    score = summed[:, level] - np.maximum(hits - 1, 0) * charge
+    return (hits > 0) & (score >= floor)
 
 
-def best_group(pair, hits, n_pairs):
-    """Rows holding their pair's largest hit count (ties kept), among pairs with any hit."""
-    top = np.zeros(n_pairs, np.int32)
-    np.maximum.at(top, pair, hits)
-    return (hits == top[pair]) & (hits > 0)
+def per_target(pair, group, true, on, pair_q, n_queries):
+    """(true targets called, false groups called) per query: a group is called by any read pair."""
+    q = pair_q[pair[on]]
+    key = q.astype(np.int64) * (int(group.max()) + 2) + group[on]
+    _, first = np.unique(key, return_index=True)
+    return true[on][first].sum() / n_queries, (~true[on][first]).sum() / n_queries
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("members")
+    p.add_argument("--out", required=True)
     p.add_argument("--held", type=int, default=6000)
     p.add_argument("--member-queries", type=int, default=1500)
-    p.add_argument("--per-bin", type=int, default=150)
-    p.add_argument("--pairs", type=int, default=3)
+    p.add_argument("--per-bin", type=int, default=150, help="queries per identity bin, and with no relative")
+    p.add_argument("--pairs", type=int, default=3, help="read pairs per query")
     p.add_argument("--top", type=int, default=50)
+    p.add_argument("--ks", default="13,11,9,8,7,6,5", help="largest first, so alignments are reused")
     p.add_argument("--unit-fraction", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=1)
     a = p.parse_args()
@@ -83,124 +111,161 @@ def main():
     query, index, qs, gs, identity, cover = sg.choose(members, a, rng)
     del members
     n_q, n_g = len(query), len(index)
+    scale = n_g + 2
     best, best_id = np.full(n_q, -1), np.zeros(n_q)
     for i in np.flatnonzero(cover >= 0.8):
         if identity[i] > best_id[qs[i]]:
             best_id[qs[i]], best[qs[i]] = identity[i], gs[i]
     bin_of = np.digitize(best_id, sg.BINS) - 1
+    bin_of[best < 0] = NO_RELATIVE
     chosen = []
-    for b in range(len(sg.BINS) - 1):
-        got = np.flatnonzero((best >= 0) & (bin_of == b))
+    for b in range(NO_RELATIVE + 1):
+        got = np.flatnonzero(bin_of == b)
         chosen.extend(rng.permutation(got)[: a.per_bin].tolist())
-    pair_q, mates = [], []
-    for q in sorted(chosen):
+    chosen = sorted(chosen)
+    pair_q, mates, decoys = [], [], []
+    for q in chosen:
         s = query[q]
         for _ in range(a.pairs):
             gap = int(rng.integers(0, sg.GAP + 1))
             start = int(rng.integers(0, len(s) - 2 * sg.MATE - gap + 1))
+            m1, m2 = s[start : start + sg.MATE], s[start + sg.MATE + gap : start + 2 * sg.MATE + gap]
             pair_q.append(q)
-            mates += [s[start : start + sg.MATE], s[start + sg.MATE + gap : start + 2 * sg.MATE + gap]]
+            mates += [m1, m2]
+            decoys += [m1[::-1], m2[::-1]]
     pair_q = np.array(pair_q)
     n_pairs = len(pair_q)
-    print(f"{n_pairs} pairs, {n_g} groups", flush=True)
+    pair_bin = bin_of[pair_q]
+    pairs_by_bin = np.bincount(pair_bin, minlength=NO_RELATIVE + 1)
+    queries_by_bin = np.bincount(bin_of[chosen], minlength=NO_RELATIVE + 1)
+    print(f"{n_pairs} pairs, {n_g} groups, pairs by bin {pairs_by_bin.tolist()}", flush=True)
+    relative = pair_bin != NO_RELATIVE
 
-    aligned = qs.astype(np.int64) * (n_g + 2) + gs
+    aligned = qs.astype(np.int64) * scale + gs
     o = np.argsort(aligned)
     aligned, aligned_x = aligned[o], identity[o]
-
-    for k in KS:
-        pair, group, levels = rows_for(mates, k, sg.postings_index(index, k, sg.analyse.ENCODE))
+    out = {
+        "source": a.members, "groups": n_g, "pairs": n_pairs, "pairs_per_query": a.pairs, "mate": sg.MATE,
+        "seed": a.seed, "identity_bins": sg.BINS.tolist(), "x_edges": X_EDGES.tolist(),
+        "pairs_by_bin": pairs_by_bin.tolist(), "queries_by_bin": queries_by_bin.tolist(), "k": {},
+        "floors": list(FLOORS), "salts": SALTS, "n_bands": N_BANDS,
+    }
+    for k in map(int, a.ks.split(",")):
+        t0 = time.perf_counter()
+        idx = sg.postings_index(index, k, sg.analyse.ENCODE)
+        pair, group, levels = rows_for(mates, k, idx)
         M = levels[:, 0]
         q_of = pair_q[pair]
         true = group == best[q_of]
-        wanted = q_of.astype(np.int64) * (n_g + 2) + group
+        wanted = q_of.astype(np.int64) * scale + group
         at = np.searchsorted(aligned, wanted)
         at[at == len(aligned)] = 0
         known = aligned[at] == wanted
-        x = np.where(known, aligned_x[at], np.nan)
-        if k == 9:  # whole-protein identity for every row, for truth levels
-            distinct, inverse = np.unique(wanted[~known], return_inverse=True)
+        if k >= ALIGN_FROM_K and (~known).any():  # identity for every row, for truth levels
+            distinct = np.unique(wanted[~known])
             got = _core.align_identity(
-                [query[int(v // (n_g + 2))] for v in distinct], [index[int(v % (n_g + 2))] for v in distinct]
+                [query[int(v // scale)] for v in distinct], [index[int(v % scale)] for v in distinct]
             )
-            x[~known] = np.asarray(got["identity"], float)[inverse]
-            print(f"aligned {len(distinct):,} more", flush=True)
-        print(f"\nk{k}: {len(pair):,} rows, {len(pair) / n_pairs:.0f} groups sharing >= 1 k-mer per pair, "
-              f"mean M true {M[true].mean():.1f}, other {M[~true].mean():.2f}", flush=True)
-        print(" m, h: recall real / binomial; others per pair real / binomial; precision real / binomial"
-              + ("; precision x>=.7 real / binomial" if k == 9 else ""))
-        for level in LEVELS:
-            m = 2**level
+            aligned = np.concatenate([aligned, distinct])
+            aligned_x = np.concatenate([aligned_x, np.asarray(got["identity"], float)])
+            o = np.argsort(aligned)
+            aligned, aligned_x = aligned[o], aligned_x[o]
+            at = np.searchsorted(aligned, wanted)
+            at[at == len(aligned)] = 0
+            known = aligned[at] == wanted
+            print(f"k{k}: aligned {len(distinct):,} more", flush=True)
+        x = np.where(known, aligned_x[at], np.nan)
+        band = np.where(true, TRUE_BAND, np.where(known, np.digitize(x, X_EDGES) - 1, UNKNOWN_BAND))
+        cells = np.stack([pair_bin[pair], band, M], 1)
+        keys, counts = np.unique(cells, axis=0, return_counts=True)
+        table = [[*map(int, c), int(n)] for c, n in zip(keys, counts, strict=True)]
+
+        # Each query's M on its true group per read pair: reads of one target share its conservation.
+        true_m = np.zeros(n_pairs, np.int32)
+        true_m[pair[true]] = M[true]
+        by_query = true_m.reshape(-1, a.pairs)
+        per_query = np.column_stack([bin_of[chosen], by_query])[np.array(bin_of[chosen]) != NO_RELATIVE]
+
+        d_pair, _, d_levels = rows_for(decoys, k, idx)
+        d_keys, d_counts = np.unique(d_levels[:, 0], return_counts=True)
+
+        real = {}
+        for level in range(LEVELS_MAX):
             hits = levels[:, level]
             for h in HITS:
-                prob = at_least(M, m, h)
-                real = hits >= h
-                # Recall is P(a pair anchors the true group), one row per pair at most.
-                r_tp, b_tp = real[true].sum() / n_pairs, prob[true].sum() / n_pairs
-                r_fp, b_fp = real[~true].sum() / n_pairs, prob[~true].sum() / n_pairs
-                line = (f"  {m:4d} {h}: {r_tp:.3f} / {b_tp:.3f}; {r_fp:7.2f} / {b_fp:7.2f}; "
-                        f"{r_tp / max(r_tp + r_fp, 1e-9):.3f} / {b_tp / max(b_tp + b_fp, 1e-9):.3f}")
-                if k == 9:
-                    ok = true | (x >= 0.7)
-                    line += (f"; {real[ok].sum() / max(real.sum(), 1):.3f} / "
-                             f"{prob[ok].sum() / max(prob.sum(), 1e-9):.3f}")
-                print(line, flush=True)
-        # Best group per pair. Real sampling shares decisions across groups; thinning here does not.
-        print(" best group per pair, m: assigned, precision, true group in the best set: real / independent thinning")
-        for level in LEVELS:
-            m = 2**level
-            real = best_group(pair, levels[:, level], n_pairs)
-            draws = []
-            for seed in range(10):
-                thin = np.random.default_rng(seed).binomial(M, 1 / m)
-                keep = best_group(pair, thin, n_pairs)
-                draws.append(((keep & true).sum() / max(keep.sum(), 1), (keep & true).sum() / n_pairs, keep.sum() / n_pairs))
-            d = np.mean(draws, 0)
-            print(f"  {m:4d}: groups per pair {real.sum() / n_pairs:.2f} / {d[2]:.2f}; "
-                  f"precision {(real & true).sum() / max(real.sum(), 1):.3f} / {d[0]:.3f}; "
-                  f"recall {(real & true).sum() / n_pairs:.3f} / {d[1]:.3f}", flush=True)
-        # One hash draw, or the expectation? Real sampling over salts against the binomial.
-        idx = sg.postings_index(index, k, sg.analyse.ENCODE)
-        draws = {}
+                on = hits >= h
+                ok = true | (x >= 0.7)
+                t_true, t_false = per_target(pair, group, true, on, pair_q, len(chosen))
+                real[f"{level},{h}"] = {
+                    "recall": float((on & true & relative[pair]).sum() / max(relative.sum(), 1)),
+                    "others": float((on & ~true & relative[pair]).sum() / max(relative.sum(), 1)),
+                    "precision": float((on & true).sum() / max(on.sum(), 1)),
+                    "precision_70": float((on & ok).sum() / max(on.sum(), 1)) if k >= ALIGN_FROM_K else None,
+                    "target_true": float(t_true),
+                    "target_false": float(t_false),
+                    "decoys": float((d_levels[:, level] >= h).sum() / n_pairs),
+                }
+        # One index is one hash draw: the spread of precision over salts.
+        spread, salted = {}, {}
+        bits = key_bits(idx, k, index)
+        charge = float(np.log2(2 * (sg.MATE - k + 1)))
+        band_at = np.where(band == TRUE_BAND, 0, band + 1)
+        cell = pair_bin[pair] * N_BANDS + band_at
+        n_bins, n_levels, n_floors = NO_RELATIVE + 1, LEVELS_MAX, len(FLOORS)
+        cube = np.zeros((n_levels, n_floors, n_bins * N_BANDS), np.int64)
+        query_pass = np.zeros((n_levels, n_floors, n_bins, a.pairs + 1), np.int64)
+        decoy_pass = np.zeros((n_levels, n_floors), np.int64)
+        floor_precision = np.zeros((SALTS, n_levels, n_floors))
+        query_of_pair = np.searchsorted(np.array(chosen), pair_q)
+        bin_of_query = bin_of[chosen]
         for salt in range(1, SALTS + 1):
-            pa, gr, lv = rows_for(mates, k, idx, salt=salt * 0x51ED27)
+            pa, gr, lv, summed = rows_for(mates, k, idx, salt=salt * 0x51ED27, bits=bits)
+            assert len(pa) == len(pair)  # the same rows: sampling changes levels, not what is shared
             tr = gr == best[pair_q[pa]]
-            for level in LEVELS[:2]:
-                for h in (1, 3):
+            rel = relative[pa]
+            dp, _, dl, ds = rows_for(decoys, k, idx, salt=salt * 0x51ED27, bits=bits)
+            for level in range(n_levels):
+                for f, floor in enumerate(FLOORS):
+                    on = passing(lv, summed, level, floor, charge)
+                    cube[level, f] += np.bincount(cell[on], minlength=n_bins * N_BANDS)
+                    floor_precision[salt - 1, level, f] = (on & tr).sum() / max(on.sum(), 1)
+                    true_pairs = np.bincount(query_of_pair[pa[on & tr]], minlength=len(chosen))
+                    np.add.at(query_pass[level, f], (bin_of_query, true_pairs), 1)
+                    decoy_pass[level, f] += passing(dl, ds, level, floor, charge).sum()
+            for level in range(LEVELS_MAX):
+                for h in HITS:
                     on = lv[:, level] >= h
-                    tp, fp = (on & tr).sum() / n_pairs, (on & ~tr).sum() / n_pairs
-                    draws.setdefault((level, h), []).append((tp, fp, tp / max(tp + fp, 1e-9)))
-                bg = best_group(pa, lv[:, level], n_pairs)
-                draws.setdefault((level, "best"), []).append(
-                    ((bg & tr).sum() / n_pairs, (bg & ~tr).sum() / n_pairs, (bg & tr).sum() / max(bg.sum(), 1))
-                )
-        print(f" over {SALTS} hash salts: recall, others, precision as mean (sd); binomial alongside")
-        for (level, h), v in draws.items():
-            mean, sd = np.mean(v, 0), np.std(v, 0)
-            m = 2**level
-            if h == "best":
-                print(f"  m {m:3d} best group: {mean[0]:.3f} ({sd[0]:.3f}), {mean[1]:.2f} ({sd[1]:.2f}), {mean[2]:.3f} ({sd[2]:.3f})", flush=True)
-                continue
-            prob = at_least(M, m, h)
-            b_tp, b_fp = prob[true].sum() / n_pairs, prob[~true].sum() / n_pairs
-            print(f"  m {m:3d} h {h}: {mean[0]:.3f} ({sd[0]:.3f}), {mean[1]:.2f} ({sd[1]:.2f}), {mean[2]:.3f} ({sd[2]:.3f}); "
-                  f"binomial {b_tp:.3f}, {b_fp:.2f}, {b_tp / max(b_tp + b_fp, 1e-9):.3f}", flush=True)
-        # How few reads are enough? Precision at m 8, h 2, from query-level subsamples.
-        queries = np.unique(q_of)
-        prob = at_least(M, 8, 2)
-        full = prob[true].sum() / prob.sum()
-        by_q = np.searchsorted(queries, q_of)
-        tp = np.bincount(by_q, prob * true, len(queries))
-        total = np.bincount(by_q, prob, len(queries))
-        print(f" precision at m 8, h 2 is {full:.4f}; relative spread from subsampled queries:")
-        for n in (25, 50, 100, 200, 400):
-            est = []
-            for seed in range(200):
-                s = np.random.default_rng(seed).choice(len(queries), n, replace=True)
-                est.append(tp[s].sum() / max(total[s].sum(), 1e-9))
-            print(f"  {n:4d} queries: sd / mean {np.std(est) / np.mean(est):.2f}")
-        print(f" M table size: {len(np.unique(np.stack([bin_of[q_of], np.minimum(M, 60), true], 1), axis=0))} cells (identity bin, M, truth)", flush=True)
-    print("peak GB", resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**30, flush=True)
+                    spread.setdefault(f"{level},{h}", []).append((on & tr).sum() / max(on.sum(), 1))
+                    salted.setdefault(f"{level},{h}", []).append((
+                        (on & tr & rel).sum() / max(relative.sum(), 1),
+                        (on & ~tr & rel).sum() / max(relative.sum(), 1),
+                        (on & tr).sum(),
+                        on.sum(),
+                    ))
+        out["k"][str(k)] = {
+            "postings": int(idx[3].size),
+            "cells": table,
+            "key_bits": [float(bits.mean()), *map(float, np.quantile(bits, [0.05, 0.95]))],
+            "charge": charge,
+            "floor_cube": cube.tolist(),
+            "floor_query_pass": query_pass.tolist(),
+            "floor_decoys": decoy_pass.tolist(),
+            "floor_precision_sd": (floor_precision.std(0) / np.maximum(floor_precision.mean(0), 1e-9)).round(3).tolist(),
+            "floor_rows": np.bincount(cell, minlength=n_bins * N_BANDS).tolist(),
+            "true_by_query": per_query.tolist(),
+            "decoy": [[int(m), int(n)] for m, n in zip(d_keys, d_counts, strict=True)],
+            "real": real,
+            "precision_sd": {key: float(np.std(v) / max(np.mean(v), 1e-9)) for key, v in spread.items()},
+            "salted": {  # means over salts: recall, others, and hits on the true group and in all
+                key: [float(x) for x in np.mean(v, 0)] for key, v in salted.items()
+            },
+        }
+        Path(a.out).write_text(json.dumps(out))
+        print(f"k{k}: {len(pair):,} rows, {len(table)} cells, {time.perf_counter() - t0:.0f} s, peak "
+              f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**30:.1f} GB", flush=True)
+        if resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**30 > MAX_RSS_GB:
+            raise SystemExit(f"over {MAX_RSS_GB} GB")
+    print("wrote", a.out, flush=True)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 // @ts-check
 /* global Plotly */
-const IDS = ['alphabet', 'k', 'm', 'length', 'identity', 'proteins', 'rep_share']; // alphabet first: it sets k's range
+const IDS = ['alphabet', 'k', 'm', 'length', 'identity', 'proteins', 'rep_share', 'index-set', 'floor', 'truth', 'mix', 'no_relative', 'reads', 'targets']; // alphabet first: it sets k's range
 const el = (id) => /** @type {HTMLInputElement} */ (document.getElementById(id));
 
 const compact = (x) => (x >= 1e4 || (x > 0 && x < 0.01) ? x.toExponential(1).replace('e+', 'e') : x >= 100 ? x.toFixed(0) : x.toPrecision(2));
@@ -16,6 +16,13 @@ function params() {
     rep_share: +el('rep_share').value,
     alphabet: el('alphabet').value,
     paired: el('paired').checked,
+    index: el('index-set').value,
+    floor: +el('floor').value,
+    truth: +el('truth').value,
+    mix: el('mix').value,
+    no_relative: +el('no_relative').value,
+    reads: 10 ** +el('reads').value,
+    targets: Math.round(10 ** +el('targets').value),
   };
 }
 
@@ -26,6 +33,10 @@ function showInputs(p) {
   el('identity-out').textContent = p.identity.toFixed(2);
   el('proteins-out').textContent = p.proteins.toExponential(1).replace('e+', 'e');
   el('rep_share-out').textContent = p.rep_share.toFixed(3);
+  el('floor-out').textContent = `${p.floor} bits`;
+  el('no_relative-out').textContent = p.no_relative.toFixed(2);
+  el('reads-out').textContent = p.reads.toExponential(1).replace('e+', 'e');
+  el('targets-out').textContent = p.targets.toExponential(1).replace('e+', 'e');
 }
 
 const AXIS = { zeroline: false, automargin: true };
@@ -55,7 +66,46 @@ function gridForSparsity(p) {
   return [{ ...SIMULATED, name: `Simulated (${grid.identity_bins[b]}+)`, x: rows.map((x) => x.m), y: rows.map((x) => x.recall[b]) }];
 }
 
+function drawPrecision(q, p) {
+  const off = el('precision-unavailable');
+  off.hidden = q.available;
+  el('precision-results').hidden = !q.available;
+  if (!q.available) {
+    off.textContent = p.alphabet !== 'protein'
+      ? 'Tables are measured for the protein alphabet only so far.'
+      : `No table at k ${p.k}. Tables exist at k ${(q.ks ?? []).join(', ')}.`;
+    return;
+  }
+  const value = (x, digits = 3) => (x === null ? '–' : x.toFixed(digits));
+  const spread = q.hash_sd === null || q.precision === null ? '' : ` ± ${(q.precision * q.hash_sd).toFixed(3)}`;
+  el('p-precision').textContent = `${value(q.precision)}${spread}`;
+  el('p-recall').textContent = value(q.recall);
+  el('p-auprc').textContent = value(q.auprc);
+  el('p-hits').textContent = q.over_limit ? 'over 12' : String(q.hits_needed);
+  el('p-others').textContent = compact(q.others);
+  el('p-chance').textContent = q.chance === 0 ? '0' : compact(q.chance);
+  el('p-target-precision').textContent = value(q.target_precision);
+  el('p-target-recall').textContent = value(q.target_recall);
+  el('p-depth').textContent = compact(q.depth);
+  const hits = q.curve_recall.map((_, i) => `at least ${i + 1} hits`);
+  const traces = [{
+    x: q.curve_recall, y: q.curve_precision, text: hits, name: 'By hits needed', mode: 'lines+markers', line: { color: '#1f6fb2' },
+    hovertemplate: 'recall %{x:.3f}, precision %{y:.3f}, %{text}<extra></extra>',
+  }];
+  if (!q.over_limit && q.precision !== null) {
+    traces.push({ x: [q.recall], y: [q.precision], name: 'This floor', mode: 'markers', marker: { color: '#c0392b', size: 11 } });
+  }
+  Plotly.react('plot-pr', traces, {
+    ...LAYOUT,
+    uirevision: 1,
+    title: { text: `Precision and recall (${p.index}, k ${p.k}, 1 in ${p.m})`, font: { size: 14 } },
+    xaxis: { ...AXIS, title: { text: 'Recall per read' }, range: [0, 1] },
+    yaxis: { ...AXIS, title: { text: 'Precision per read' }, range: [0, 1] },
+  }, CONFIG);
+}
+
 function draw(r, p) {
+  drawPrecision(r.precision, p);
   el('recall').textContent = r.recall.toFixed(3);
   el('index').textContent = size(r.index_gb);
   el('postings').textContent = r.postings.toExponential(1).replace('e+', 'e');
@@ -130,6 +180,7 @@ function update() {
 }
 
 el('controls').addEventListener('input', update);
+el('precision-form').addEventListener('input', update);
 update();
 
 for (const [alphabet, file] of Object.entries(GRID_FILES)) {

@@ -317,7 +317,7 @@ Phases 1–3 are the plan. The rest is a backlog, reordered as questions come up
 - Readouts: index size at a chosen database size, and chance anchors per read.
 - *Done when:* the check's tolerances hold, and slider moves redraw with no visible lag in a browser.
 
-Phases 1–3 and 3b are built, and phase 3c is partly done (below). Nothing later has started.
+Phases 1–3 and 3b are built, phase 3c is partly done and phase 4 is mostly done (below). Nothing later has started.
 
 **Phase 2: analyse a small set in the browser.**
 
@@ -373,6 +373,8 @@ been measured:
 - Best-group assignment from a stored panel of reads, or from the grid at set values.
 - *Done when:* page values match a held-out simulation at settings not used for its tables.
 - The analytic model stays for what has no table: other k and quick exploration. Tables win where they exist.
+- **Not done yet:** bit bands, best-group assignment, decoy-calibrated floor, tables for other alphabets
+  and policies, and per-target checks beyond depth 6.
 
 **Phase 5: index selection, scenarios and scale.** A selector for the index, with each index
 supplying its target lengths, group sizes and homologue spectrum (mini-slice and MGnify at first, a
@@ -545,6 +547,27 @@ by the user.
   - **Also not covered:** reads with no relative (8–10% of queries here, more in real samples), translated
     frames and read errors, per-target precision across reads, per-key bits in the floor (kfp's bits vary
     by key, so M would need bit bands), and kfp's own key policies and verification.
+
+- **2026-11-04: phase 4, tables.** `measure/precision_tables.py` writes M tables for k 5–9, 11, 13
+  (`web/data/tables-mini-slice.json`, `tables-slice.json`, about 600 KB each). The page has a precision panel:
+  index, information bit floor, truth level, identity mix, reads with no relative, read pairs and targets,
+  with precision, recall, AUPRC and a PR curve, at any sparsity. About 20 ms per update in the browser, with
+  1.0 s start-up. `checks/test_tables.py` passes.
+  - **Held-out check** (mini-slice, different queries, 9,000 read pairs, k 7, 9, 11, m 1–128, against 8
+    hash salts): recall RMSE 0.007; others 14% and precision 14% (log-ratio RMSE, settings with at least 1
+    other per pair); precision at relative identity ≥ 0.7 is 5%, against one hash draw. The tables run
+    slightly low on others (for example 35.7 against 37.7), so precision reads slightly high. The slice
+    has no held-out run yet.
+  - **The first test was unfair:** unsalted hashing is the same draw in every run, and it runs high here (22
+    others per pair at k 9, m 32, against a mean of 17). Comparing means over salts removed most of the gap,
+    with limits unchanged. Index-specific draws do matter, hence the range on the page.
+  - **Per target, depth 6:** reads of one target share conservation, so independent reads gave recall 0.80
+    against 0.66. Using each query's own M reduces RMSE to 0.080, right at the check's limit. It stays 0.09–0.14
+    too high at m 32, probably since reads of one target share k-mers and hash decisions. False groups:
+    log-ratio RMSE 0.21. Greater depth is untested and likely worse. The chance term's growth exponent is kfp's.
+  - **The floor is simplified.** One bits value per k-mer, kfp's formula, no bit bands, and not calibrated
+    to kfp's real scores. It behaves as a hit threshold.
+  - At k 5–6 relatives are mostly not aligned, and count as wrong for "or a relative" truth levels.
 
 ## Licence
 

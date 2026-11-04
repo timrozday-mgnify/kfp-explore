@@ -75,6 +75,10 @@ onmessage = ({ data }) => {
     await pyodide.loadPackage('numpy');
     pyodide.runPython(await (await fetch('model.py')).text());
     pyodide.FS.writeFile('/home/pyodide/analyse.py', await (await fetch('analyse.py')).text());
+    for (const name of ['mini-slice', 'slice']) {
+      const response = await fetch(`data/tables-${name}.json`);
+      if (response.ok) pyodide.globals.get('load_table')(name, await response.text());
+    }
     py = pyodide;
     postMessage({ ready: performance.now() - t0 });
     run();
