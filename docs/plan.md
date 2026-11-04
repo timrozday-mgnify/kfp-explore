@@ -133,6 +133,9 @@ the correlation between reads.
   k-mer factor.
 - The tail is an empirical curve per (k, sparsity), scaled linearly in proteins as
   `query.decoy_bar` does.
+- The score bar is the information bit floor, with its own control on the page.
+- A starting estimate from kfp's two release figures (k 5 and k 6, by hand): chance groups per read
+  at 30 bits are about 3–4 × 10⁻⁴ of chance anchors, falling ~10× per 10 bits. Other k are untested.
 - Independent hits fail because of overlapping k-mers, biased local composition and sticky leaves
   (leaves that attract many chance hits). Key-count dispersion matters as well.
 
@@ -147,6 +150,44 @@ a read's source, at database size N. Then:
 - Hits on a relative are treated as independent of hits on the truth. They are not, so level 2
   must test this first. kfp found that at scale the limit is assignment among close groups, not
   detection, so this is the term that matters most for large indexes.
+
+**Grouping and the group k-mer policy.** The index stores k-mers for groups, not for each protein,
+so two choices change what a read can match:
+
+- **Radius:** the identity within which proteins form a group. A wider radius gives fewer groups,
+  and relatives inside it stop being false hits, but keys must represent more diverse members.
+  kfp's groups are MGnify90 units or `tree:<d>` (0.34 ~ 95%, 0.57 ~ 90%, 0.83 ~ 80% identity), and
+  `build.wide_clusters` makes wider ones.
+- **Policy:** which member k-mers become the group's keys:
+  - one representative (`medoid`, `central`, `longest`);
+  - the union (`composite:0`);
+  - a soft intersection, k-mers held by at least a share f of members (`composite:f`, today f = 0.25);
+  - the top n by member frequency.
+
+  Sparsity is applied after the policy, or as a key budget per group (`--layer-keys`).
+
+In the chain, a policy sets two things per site class: the identity between the read and the key's
+source, and the chance a matching window is kept as a key. Soft intersection and frequency ranking
+move keys into conserved windows, which is why they keep more matches at low identity. The policy
+also changes postings, because the union grows with group diversity and an intersection shrinks.
+
+*First test (exploratory):* a class-only prediction of kfp's retention table (share of a group's 32
+keys a held-out protein holds, at identity 0.6–0.9, four policies) gave RMSE 0.11, no better than
+independent mutations (0.11). It overestimates soft intersection and frequency ranking, for example
+0.82 against 0.52 for f = 0.25 at identity 0.9. So retention by (policy, radius, identity) has to be
+measured, with the model interpolating between measurements. The table's values are also below 1 at
+identity 1 (0.25–0.85), which a useful model must explain.
+
+**Number of reads.** It enters in three ways:
+
+- **Recall:** reads per target = reads × read length × abundance / target length. A community
+  richness and evenness turn the read count into a depth per target.
+- **Read-level chance:** (read pair, group) chance seeds grow linearly with reads.
+- **Sample-level chance:** distinct chance groups grow slower, as reads^~0.5 at 30 bits and ^~0.7
+  at 40–50 bits (kfp, 1/64 of reads to all), because sticky leaves take repeat hits. kfp's estimate
+  of this curve stops at 261,591 read pairs, so it needs a real 10 M read-pair sample.
+
+Precision is therefore reported at two levels: per read, and per target in a sample of a given size.
 
 **Index size.** postings = Σ max(residues / m, floor keys) over representatives, times bytes per
 posting (~6 B for the anchor design, 19–20 B for today's tier). Representatives grow with the
@@ -185,7 +226,8 @@ kfp's measured triples are the reference.
 - **Rust compiled to wasm: not planned.** The model does not need it, and heavy work runs natively.
   If a browser simulation is ever added and NumPy cannot batch a loop, note that `crates/core`
   uses `std::thread`, which does not work on plain `wasm32-unknown-unknown`.
-- **UI: TypeScript, no framework, no bundler, Plotly** for hover, log axes and heatmaps. Parameters
+- **UI: JavaScript with `// @ts-check`, no framework, no bundler, Plotly** for hover, log axes and
+  heatmaps. Type-checked without a build step; move to TypeScript if the UI grows. Parameters
   live in the URL so a view can be shared.
 - **Hosting: GitHub Pages.** Static, with no backend.
 
@@ -201,7 +243,8 @@ JSON table the page loads.
 | Homologue spectrum: other groups per identity bin, by database size | Precision, close and no-close scenarios | Held-out proteins aligned to the rest, database subsampled (`recall.py holdout`, DIAMOND) |
 | Conservation: match-run lengths by identity | Replaces the fitted φ, ρ, ℓ; recall | The same alignments, per aligned position |
 | Decoy tail per (k, m), and per-leaf decoy seeds | Noise floor, sticky leaves | Real index, reversed reads (`query.py --decoy`) |
-| Group structure: sizes, key share held by members, representative distance, keys per leaf | Recall ceiling, key dispersion | Build outputs, `survey.py` |
+| Group structure per radius: group count and sizes, representative distance, keys per leaf | Recall ceiling, key dispersion, postings | Build outputs, `survey.py`, `wide_clusters` |
+| Key retention by (policy, radius, identity), and postings per policy | Effect of grouping and policy | Held-out proteins against keys built each way (kfp's soft intersection test) |
 | k-mer spectrum per k: distinct/total, hot tail, holders per k-mer | Index size, lookup cost, chance correction | Counts over a uniform sample, plus kfp's `stream.json` |
 | Growth with N: units, distinct k-mers, postings, singletons | Extrapolating to a massive index | Proteins subsampled 1/64 to 1, Good–Turing |
 | Length distribution | Short and long breakdown, floors | Counts |
@@ -256,7 +299,7 @@ reversed here where kfp reverses reads.
 2. Decoy tails on a grid of (k, m).
 3. Query summaries and the simulated grid.
 4. Spectrum, lengths and growth (cheap, and needed early for index size).
-5. Group and tree structure.
+5. Group and tree structure, and retention by policy and radius.
 
 Local samples are enough to build and test the pipeline. Values for massive indexes need a uniform
 MGnify sample at several sizes, run by the user on HPC.
@@ -272,6 +315,8 @@ Phases 1–3 are the plan. The rest is a backlog, reordered as questions come up
 - Plots: recall against identity, and recall against m for several k.
 - Readouts: index size at a chosen database size, and chance anchors per read.
 - *Done when:* the check's tolerances hold, and slider moves redraw with no visible lag in a browser.
+
+Phase 1 is built. Nothing below it has started.
 
 **Phase 2: analyse a small set in the browser.**
 
@@ -290,23 +335,41 @@ Phases 1–3 are the plan. The rest is a backlog, reordered as questions come up
   If the model cannot follow the simulation on precision, precision plots show only the grid's
   points: no slider between grid values, unless they are interpolated.
 
-**Phase 4: score and noise floor.** Hit-count distribution, per-key bits, decoy tail tables, a
-score bar slider, the PR curve and AUPRC under one scenario.
+**Phase 4: score, noise floor and precision.** Hit-count distribution, per-key bits, decoy tail
+tables, an information bit floor slider, a number of reads control with depth per target,
+precision per read and per target, the PR curve and AUPRC under one scenario.
 
-**Phase 5: scenarios and scale.** Homologue spectra and presets, a database size axis, comparison
-of small and massive indexes, and target length breakdown.
+**Phase 5: index selection, scenarios and scale.** A selector for the index, with each index
+supplying its target lengths, group sizes and homologue spectrum (mini-slice and MGnify at first, a
+loaded FASTA from phase 2). Homologue spectra and presets, a database size axis, comparison of small
+and massive indexes, and a breakdown of recall, precision and postings by target length.
 
-**Phase 6: SNP and overlap panel.** The miss probabilities above, with a key-placement diagram.
+**Phase 6: grouping and key policy.** Controls for radius and policy. Recall, precision and index
+size respond to both, from measured retention by (policy, radius, identity). Relatives within the
+radius count as correct. *Done when:* the model reproduces kfp's matched comparisons, such as
+`tree:0.34`, `tree:0.57` and `tree:0.83` at composite 0.25, and composite 0 against 0.25.
 
-**Phase 7: optimiser.** Heatmaps of AUPRC against index size over k × m. The best parameters per
+**Phase 7: SNP and overlap panel.** The miss probabilities above, with a key-placement diagram.
+
+**Phase 8: optimiser.** Heatmaps of AUPRC against index size over k × m. The best parameters per
 scenario, under an index size budget.
 
-**Phase 8: combination k-mers.** Added to the model and the simulator.
+**Phase 9: combination k-mers.** Added to the model and the simulator.
 
 **Measurement workflow (runs alongside phases 4–5).** `measure/` grows into a Nextflow workflow that
 produces the JSON tables in [What to measure](#what-to-measure), shipped for the user to run.
 It includes the [scale profile](#scaling-to-full-size). Anything at full MGnify scale runs on HPC
 by the user.
+
+## Progress log
+
+- **2026-11-04: phase 1.** `web/` runs the model in a Pyodide worker, with k, sparsity, read length,
+  identity, database size, representative share and paired reads as controls, held in the URL.
+  - `checks/test_model.py` passes: chain against Monte Carlo within 0.005, fit on m 8 gives RMSE
+    0.010 and held-out m 16 gives 0.024, chance within 2× of kfp, postings within 30%.
+  - In the desktop app's browser pane: start-up 1.3 s (5.7 s on another load), compute 23–105 ms.
+    During a simulated 2 s drag the page drew 19 times, about 10 per second, with the longest
+    main-thread gap at 197 ms. Whether this counts as no visible lag is for the user to judge.
 
 ## Licence
 

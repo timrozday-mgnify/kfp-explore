@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kfp-explore</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #fff; color: #222; }
+  h1 { font-size: 18px; margin: 0 0 8px; }
+  form { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px 24px; }
+  label { display: block; }
+  label span { float: right; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; }
+  #status { color: #666; margin: 8px 0; min-height: 1.4em; }
+  #readouts { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; margin: 8px 0; }
+  #readouts b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+  #plots { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 8px; }
+  #plots > div { height: 380px; }
+  p.note { color: #666; max-width: 70em; }
+</style>
+</head>
+<body>
+<h1>kfp-explore: anchor recall</h1>
+<form id="controls">
+  <label>k <span id="k-out"></span><input type="range" id="k" min="3" max="15" step="1" value="9"></label>
+  <label>Sparsity, 1 in m <span id="m-out"></span><input type="range" id="m" min="0" max="8" step="1" value="3"></label>
+  <label>Read length, residues per mate <span id="length-out"></span><input type="range" id="length" min="10" max="300" step="5" value="50"></label>
+  <label>Identity to the indexed group <span id="identity-out"></span><input type="range" id="identity" min="0.5" max="1" step="0.01" value="0.9"></label>
+  <label>Database, proteins <span id="proteins-out"></span><input type="range" id="proteins" min="4" max="11" step="0.1" value="9.8"></label>
+  <label>Representative share <span id="rep_share-out"></span><input type="range" id="rep_share" min="0.05" max="1" step="0.005" value="0.155"></label>
+  <label><input type="checkbox" id="paired" checked> Paired reads</label>
+</form>
+<div id="status" role="status">Loading Pyodide and NumPy…</div>
+<div id="readouts">
+  <div>Anchor recall<b id="recall">–</b></div>
+  <div>Index size<b id="index">–</b></div>
+  <div>Postings<b id="postings">–</b></div>
+  <div>Chance anchors per read<b id="chance">–</b></div>
+</div>
+<div id="plots"><div id="plot-identity"></div><div id="plot-m"></div></div>
+<p class="note">Model: k-mer anchors on group representatives, with conserved and variable blocks
+fitted to kfp's 90%-AAI table (recall ceiling 0.96). Index size assumes 225 residues per
+representative and 6 bytes per posting; the representative share is held fixed as the database
+grows, which is a stand-in until the scale profile is measured. Chance assumes 3 frames per read,
+with a measured correction at k 5–9 and composition alone (a lower bound) elsewhere.</p>
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-basic-dist-min@2.35.2/plotly-basic.min.js"></script>
+<script src="main.js"></script>
+</body>
+</html>
