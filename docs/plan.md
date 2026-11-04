@@ -20,6 +20,8 @@ tables in kfp's `docs/tree-index-plan.md`.
 | Index size | Representative residues / m is within ~20% of the kfp table | Yes |
 | Noise floor tail (chance against score bar) | Independent hits fall ~1,000× per 10 bits. Decoys fall 10–12× | **No: fit it to decoys** |
 | Precision among homologues | Modelled below, not yet tested | **Unknown, the largest risk** |
+| Analysing a small set in the browser | 44 k proteins: k-mers and spectrum in under 1 s | Yes, up to about 20 M residues |
+| Extrapolating a small set to MGnify | 7× to 2,700× too low | **No: needs a measured scale profile** |
 
 Limits of this evidence:
 
@@ -31,17 +33,85 @@ Limits of this evidence:
   against a measured 0.943 at m 16, identity 0.9). Reads from one protein share its conservation,
   so this needs a per-target term.
 
-## Three levels of fidelity
+## The page and the measurements
 
-Each level checks the one before, and the page shows them on the same axes.
+They meet only through small versioned JSON tables. Each table records its source, sample and
+parameters.
 
-1. **Analytic (milliseconds).** Runs on every slider move. Covers all the scans and the optimiser.
-2. **Browser simulation (seconds).** Builds a real index from a bundled protein sample, simulates
-   reads and reversed decoys, and scores them against known truth. This shows where level 1 is
-   wrong. `data/mini-slice-100k` in kfp is a likely source; a 10 k protein subset is a few MB.
-3. **Calibration tables (static JSON).** Measured values level 1 cannot derive: decoy tails, the
-   hot k-mer correction and homologue spectra. They come from kfp outputs such as `bench.tsv`, or
-   from a script the user runs on HPC.
+1. **The page, in the browser.** The analytic model runs on every slider move and covers all the
+   scans and the optimiser. It reads the tables and computes nothing heavy.
+2. **Measurements, run separately.** Python scripts and Rust binaries in `measure/`, run on a laptop
+   for small samples or by the user on HPC at scale (Nextflow, SLURM). They produce:
+   - inputs the model cannot derive: decoy tails, the hot k-mer correction, homologue spectra;
+   - simulations with known truth: a real index, simulated reads and decoys, scored over a grid of
+     parameters. The page overlays these points on the model's curves, which shows where the model
+     is wrong.
+
+A third piece joins them: the page can also analyse a small sequence set itself, and a scale
+profile carries predictions up to full size. Both are described in
+[Analysing a small set in the browser](#analysing-a-small-set-in-the-browser) and
+[Scaling to full size](#scaling-to-full-size).
+
+## Analysing a small set in the browser
+
+Load the bundled mini-slice sample or your own FASTA, then compute directly with NumPy in Pyodide:
+k-mer spectra, composition, lengths, rarefaction, reversed decoys, a sampled index, and simulated
+reads scored against truth.
+
+Measured in Pyodide under node, one thread, at k 7:
+
+| Set | Residues | k-mers + unique + counts | Decoy lookup | Compressed |
+| --- | --- | --- | --- | --- |
+| 10 k representatives | 2.9 M | 0.3 s | 0.9 s | 1.7 MB |
+| 44 k representatives | 12.6 M | 0.8 s | 14 s | 7.4 MB |
+| 295 k proteins | 74 M | 5 s | 40 s | 13.9 MB |
+
+- Lookup used per-query binary search. Sorting queries first or merging should be much faster, but
+  that is untested.
+- Peak memory over all three runs was 3.7 GB, close to wasm's 4 GB limit. The default should be
+  10–50 k proteins, with a cap around 20 M residues.
+- A sample this small cannot measure the rare tail at k 8 and above (see the pilot results).
+
+## Scaling to full size
+
+**A small set cannot be extrapolated to MGnify alone.** Tested by fitting units against proteins on
+the mini-slice subsampled to smaller sizes:
+
+| Fit | Predicts the slice (actual 55,433) | Predicts the release (actual ~1.8 × 10⁹) |
+| --- | --- | --- |
+| Power law, to 1/4 | 67,036 | 9 × 10⁷ |
+| Power law, to 1/16 | 88,197 | 3 × 10⁸ |
+| Curved in log-log, to 1/4 | 54,950 | 7 × 10⁵ |
+| Curved in log-log, to 1/16 | 58,435 | 2 × 10⁶ |
+
+Within the slice, the curved fit is within 1–5%. To the release, every fit is 7× to 2,700× low.
+The slice is selected and dense, so its curve has a different shape from the whole database. The
+share of proteins with no ≥ 90% relative shows the same pattern: extrapolating inside the slice
+gives 0.147 against an observed 0.14, while the release-wide singleton share is 0.21.
+
+**So measure a scale profile of MGnify, natively, and interpolate between its points.**
+
+1. **A ladder of uniform samples:** 10⁵, 10⁶, 10⁷ and 10⁸ proteins, with the same statistics as the
+   browser analysis. Sample proteins by a hash of `protein_id`. Sampling by cluster, as phase 0's
+   `cluster_rep % sample` does, keeps whole clusters and so cannot measure how units grow.
+2. **Whole-release anchors** where a full pass is cheap: proteins, MGnify90 units, singletons, and
+   k-mer counts in hash slices (`stream.json`).
+3. **Interpolate, do not extrapolate.** The page fits each statistic through the ladder and its
+   anchor, as a curve against N.
+
+| Statistic | Scaling rule |
+| --- | --- |
+| Representatives, postings | Profile curve × residues / m × bytes per posting |
+| Chance anchors | Linear in postings (kfp's check), × hot k-mer factor from the profile |
+| Noise floor tail | `--chance-scale` rule, linear in proteins with a geometric tail; sticky leaves from the largest rung |
+| Homologue spectrum R(x, N) | Profile, per identity bin |
+| k-mer occupancy at small k | 1 − exp(−postings × q): saturates, so never linear |
+
+The page plots your set's curve and MGnify's together. Their ratio at the same N shows how your set
+differs from a uniform sample, and a band shows the uncertainty.
+
+*Check:* hide the largest rung, predict it from the others, and report the error. That error is
+the band. Beyond 10⁸ only the anchors constrain the curve, so these predictions stay less certain.
 
 ## The model
 
@@ -101,64 +171,143 @@ kfp's measured triples are the reference.
 
 ## Technology
 
-- **Numeric core: Rust compiled to WebAssembly.** One implementation covers the model and the
-  simulator, with native tests. Plain JS is already fast enough for level 1, so level 2 is what
-  really justifies wasm.
-- **Pyodide: not used.** It adds a large download and a slow start, and Python loops would be far
-  slower than wasm. These are expectations, not measurements. It stays an option for a one-off
-  analysis panel.
-- **Pyrodigal: not used for now.** It is a gene caller, not a Python-in-the-browser runtime, so
-  "pyrodigal" may have been meant as Pyodide. It only becomes relevant if the page ever starts from
-  DNA with gene calling.
-- **Do not depend on kfp's `crates/core`.** It pulls in needletail and uses `std::thread`, which
-  does not work on plain `wasm32-unknown-unknown`. Copy `hash_kmer` and the alphabet, with test
-  vectors checked against kfp's output.
-- **UI: TypeScript, no framework, no bundler, Plotly** for hover, log axes and heatmaps. Simulation
-  runs in a Web Worker. Parameters live in the URL so a view can be shared.
+- **Numeric core: Python and NumPy in Pyodide, in a Web Worker.** Measured under node (Pyodide
+  0.27.7), not yet in a browser:
+  - Batched NumPy computes the same 7,680 grid values in ~120 ms, against ~165 ms for plain JS. It
+    shares work across read lengths, so the two are not strictly like for like.
+  - Pure Python loops take ~8.7 s for the same grid, so the model must stay batched.
+  - Start-up is ~0.7 s for the runtime and ~0.2 s for NumPy from local files, plus downloading
+    about 15 MB uncompressed in a browser. The worker keeps the page usable meanwhile.
+  - It shares a language with kfp's workflows and needs no extra toolchain.
+- **Measurements: native Python and Rust.** Reuse kfp where it fits: `workflows/tree-index` scripts
+  and `crates/core` as a git dependency, where threads and needletail are no obstacle. Write a new
+  Rust binary only when a Python script is too slow at scale. Containers via Singularity on HPC.
+- **Rust compiled to wasm: not planned.** The model does not need it, and heavy work runs natively.
+  If a browser simulation is ever added and NumPy cannot batch a loop, note that `crates/core`
+  uses `std::thread`, which does not work on plain `wasm32-unknown-unknown`.
+- **UI: TypeScript, no framework, no bundler, Plotly** for hover, log axes and heatmaps. Parameters
+  live in the URL so a view can be shared.
 - **Hosting: GitHub Pages.** Static, with no backend.
-- **Toolchain to install:** Homebrew's Rust has only the host target, so `rustup` with
-  `wasm32-unknown-unknown` and `wasm-pack` are needed.
+
+## What to measure
+
+The model takes these as inputs. All run outside the browser, and each is summarised into a small
+JSON table the page loads.
+
+### Database
+
+| Measurement | Used for | How |
+| --- | --- | --- |
+| Homologue spectrum: other groups per identity bin, by database size | Precision, close and no-close scenarios | Held-out proteins aligned to the rest, database subsampled (`recall.py holdout`, DIAMOND) |
+| Conservation: match-run lengths by identity | Replaces the fitted φ, ρ, ℓ; recall | The same alignments, per aligned position |
+| Decoy tail per (k, m), and per-leaf decoy seeds | Noise floor, sticky leaves | Real index, reversed reads (`query.py --decoy`) |
+| Group structure: sizes, key share held by members, representative distance, keys per leaf | Recall ceiling, key dispersion | Build outputs, `survey.py` |
+| k-mer spectrum per k: distinct/total, hot tail, holders per k-mer | Index size, lookup cost, chance correction | Counts over a uniform sample, plus kfp's `stream.json` |
+| Growth with N: units, distinct k-mers, postings, singletons | Extrapolating to a massive index | Proteins subsampled 1/64 to 1, Good–Turing |
+| Length distribution | Short and long breakdown, floors | Counts |
+| Composition: global and per protein | Chance baseline | Counts |
+| Tree postings against flat postings | Index size if a tree is used | Phase 0 outputs (`gate.tsv`, `measure.json`); one factor per configuration |
+
+### Example queries
+
+Real samples give realistic summaries but have no truth, so use both kinds:
+
+- **Real samples**, about 5–10 across biomes, spanning low to high unknowns and community
+  complexity. Summaries only.
+- **A simulated grid** of unknowns × complexity × error, with truth, for performance. Spiked real
+  backgrounds, as in `workflows/presence-calibration`.
+
+| Axis | Measurement | Used for | How |
+| --- | --- | --- | --- |
+| Unknowns | Best-hit identity distribution, share with no hit | Mix of identities in recall and precision | Alignment of a read subsample; k-mer hits alone are not enough |
+| Community complexity | Richness, evenness, depth per target, read redundancy | Reads per target, depth-limited recall, chance saturation | Profile plus rarefaction of reads |
+| Sequence complexity | Read composition, low-complexity share | Local chance rate | Translated frames |
+| Error | Read length, base error rate and profile, adapters | Residue error, windows | FASTQ summaries; added errors for the grid |
+| Frames | Stop-free frames per read, windows per read | Search space for chance | Translation under kfp's frame policy |
+| Noise | Decoy curve per sample | Whether decoy tails transfer across samples, untested so far | Reversed reads of one sample against another's tail |
+
+### Pilot results
+
+Local data only: 44,270 representatives from `data/mini-slice` (not uniform, denser than the
+release) and 2,000 reads (150 nt) from fmh-funprofiler's demo. Exploratory, and proteins were
+reversed here where kfp reverses reads.
+
+| k | 5 | 6 | 7 | 8 | 9 |
+| --- | --- | --- | --- | --- | --- |
+| Distinct / total k-mers | 0.17 | 0.53 | 0.68 | 0.73 | 0.75 |
+| Decoy collisions / composition | 1.2 | 1.4 | 1.9 | 4.7 | 34 |
+| kfp's measured correction | | 1.3 | 1.5 | 1.5 | 3.8 |
+| Collisions between units / composition | 3.2 | 25 | 306 | 4,195 | 60,106 |
+
+- Decoy rates match kfp at k 6–7. At k 8–9 a few k-mers dominate (the top 1% give 62–87% of hits),
+  so this sample size cannot estimate them.
+- Above k 5, matches between units are overwhelmingly homology, not chance. This makes the homologue
+  spectrum the most important measurement.
+- Representative lengths: 5–95% 65–707 aa, E[L²] / E[L]² = 2.6. Length alone therefore explains part
+  of the key-count dispersion.
+- Stop-free frames per read: mean 1.81, with 13% of reads at none and 28% at three or more. Error
+  lowers it to 1.42 at 10%. The check's flat "3 frames" is only a stand-in.
+- 6-mer hits per window are 0.30 in the reads' best frame and 0.32 on reversed reads, so at this
+  scale they say nothing about known against unknown. Hence the alignment for unknowns.
+
+### Order
+
+1. Homologue spectrum and conservation, from one set of alignments.
+2. Decoy tails on a grid of (k, m).
+3. Query summaries and the simulated grid.
+4. Spectrum, lengths and growth (cheap, and needed early for index size).
+5. Group and tree structure.
+
+Local samples are enough to build and test the pipeline. Values for massive indexes need a uniform
+MGnify sample at several sizes, run by the user on HPC.
 
 ## Phases
 
-Phases 1–2 are the plan. The rest is a backlog, reordered as questions come up.
+Phases 1–3 are the plan. The rest is a backlog, reordered as questions come up.
 
 **Phase 1: the first page.**
 
-- Rust chain with `model_check` ported as native tests.
+- Batched NumPy chain in a Pyodide worker, with `model_check` ported as a Python test.
 - Controls: k, m, read length, identity.
 - Plots: recall against identity, and recall against m for several k.
 - Readouts: index size at a chosen database size, and chance anchors per read.
-- *Done when:* the check's tolerances hold natively, and slider moves redraw with no visible lag.
+- *Done when:* the check's tolerances hold, and slider moves redraw with no visible lag in a browser.
 
-**Phase 2: browser simulation.**
+**Phase 2: analyse a small set in the browser.**
 
-- Reduced index from a bundled sample, simulated reads at a set identity, reversed decoys.
+- Load the bundled sample or a FASTA file. Spectrum, lengths, composition, rarefaction and reversed
+  decoys, drawn with the model's predictions.
+- *Done when:* the 44 k set runs in the browser within seconds per step, and the numbers match the
+  native pilot.
+
+**Phase 3: native simulation grid.**
+
+- `measure/` script: index from a local sample, simulated reads at set identities, reversed decoys,
+  over a small grid of (k, m). Writes a JSON table.
 - Measured points overlaid on the model's curves.
 - *Done when:* the simulation agrees with kfp for a matching configuration, using reduced-scale
   numbers from `results-hpc`. This phase also tests the independence assumption for homologues.
-  If the model cannot follow the simulation on precision, level 2 becomes the only source for
-  precision plots, at seconds per point rather than milliseconds.
+  If the model cannot follow the simulation on precision, precision plots show only the grid's
+  points: no slider between grid values, unless they are interpolated.
 
-**Phase 3: score and noise floor.** Hit-count distribution, per-key bits, decoy tail tables, a
+**Phase 4: score and noise floor.** Hit-count distribution, per-key bits, decoy tail tables, a
 score bar slider, the PR curve and AUPRC under one scenario.
 
-**Phase 4: scenarios and scale.** Homologue spectra and presets, a database size axis, comparison
+**Phase 5: scenarios and scale.** Homologue spectra and presets, a database size axis, comparison
 of small and massive indexes, and target length breakdown.
 
-**Phase 5: SNP and overlap panel.** The miss probabilities above, with a key-placement diagram.
+**Phase 6: SNP and overlap panel.** The miss probabilities above, with a key-placement diagram.
 
-**Phase 6: optimiser.** Heatmaps of AUPRC against index size over k × m. The best parameters per
+**Phase 7: optimiser.** Heatmaps of AUPRC against index size over k × m. The best parameters per
 scenario, under an index size budget.
 
-**Phase 7: combination k-mers.** Added to the model and the simulator.
+**Phase 8: combination k-mers.** Added to the model and the simulator.
 
-**Phase 8: calibration script.** Turns kfp outputs into the JSON tables, and is shipped for the
-user to run. Anything at full MGnify scale runs on HPC by the user.
+**Measurement workflow (runs alongside phases 4–5).** `measure/` grows into a Nextflow workflow that
+produces the JSON tables in [What to measure](#what-to-measure), shipped for the user to run.
+It includes the [scale profile](#scaling-to-full-size). Anything at full MGnify scale runs on HPC
+by the user.
 
-## Open decisions
+## Licence
 
-1. **Licence.** The repo has none, and it is public. Code copied from kfp (GPL-3.0-or-later) means
-   this repo must be GPL-compatible, so GPL-3.0-or-later is the natural choice.
-2. **Rust from phase 1, or TypeScript until phase 2?** The default here is Rust from phase 1, as
-   requested, so there is only one numeric implementation.
+GPL-3.0-or-later.

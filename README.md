@@ -9,3 +9,5 @@ Early stage: see [the plan](docs/plan.md). The page does not exist yet.
 ```bash
 node checks/model_check.mjs  # the model against Monte Carlo and kfp's measured tables
 ```
+
+Licence: GPL-3.0-or-later.
