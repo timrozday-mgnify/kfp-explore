@@ -19,7 +19,7 @@ tables in kfp's `docs/tree-index-plan.md`.
 | Chance anchors per read pair | Composition alone is 1.2–1.5× under at k 6–8 and 3.5–3.8× under at k 9 | Yes, with a measured correction |
 | Index size | Representative residues / m is within ~20% of the kfp table | Yes |
 | Noise floor tail (chance against score bar) | Independent hits fall ~1,000× per 10 bits. Decoys fall 10–12× | **No: fit it to decoys** |
-| Precision among homologues | Predicted precision is 2–6× too high against the simulation grid, and hits on relatives are not independent of the true hit | **No: use measured values from the grid** |
+| Precision among homologues | Measured shared k-mer counts predict it at any sparsity and hit threshold, on average over hashes. Best-group assignment and growth to massive indexes are not yet predicted | **Yes per index, from a small measured table; see below** |
 | Analysing a small set in the browser | 44 k proteins: k-mers and spectrum in under 1 s | Yes, up to about 20 M residues |
 | Extrapolating a small set to MGnify | 7× to 2,700× too low | **No: needs a measured scale profile** |
 
@@ -317,7 +317,7 @@ Phases 1–3 are the plan. The rest is a backlog, reordered as questions come up
 - Readouts: index size at a chosen database size, and chance anchors per read.
 - *Done when:* the check's tolerances hold, and slider moves redraw with no visible lag in a browser.
 
-Phases 1–3 are built. Nothing below them has started.
+Phases 1–3 and 3b are built, and phase 3c is partly done (below). Nothing later has started.
 
 **Phase 2: analyse a small set in the browser.**
 
@@ -336,11 +336,43 @@ Phases 1–3 are built. Nothing below them has started.
   If the model cannot follow the simulation on precision, precision plots show only the grid's
   points: no slider between grid values, unless they are interpolated.
 
-**Phase 4: score, noise floor and precision.** Hit-count distribution, per-key bits, decoy tail
-tables, an information bit floor slider, a number of reads control with depth per target,
-precision per read and per target, the PR curve and AUPRC under one scenario. Phase 3 showed the
-model cannot predict hits on relatives, so the grid must add hits per read by score and relative
-identity, and precision is read from it at grid values, not predicted between them.
+**Phase 3b: correlated hits.** Added after phase 3, before phase 4. Hits on a read's true group and
+its relatives share two things, so independence holds only given both:
+
+1. **A rate per read,** λ ~ Gamma(a, 1/a), with identity to anything = identity^λ. In the model and
+   page.
+2. **Hash sampling,** which is shared: a k-mer that two groups both hold is kept or dropped for both.
+   Needed for reads that miss their true group.
+3. **What the unaligned hits are.** 53–84% of other-group hits fall outside each query's 50 aligned
+   candidates. Align more, and align a sample of those hits directly.
+4. **Fit on another set.** Repeat on `tree-index-slice`, to find out whether a default works or each
+   index needs its own fit.
+
+**Phase 3c: extend the measurements to the wider ranges.** The page's ranges are ahead of what has
+been measured:
+
+- **Nucleotide simulation.** Nucleotide mode is unvalidated. It needs relatives at the nucleotide level
+  (gene sequences, which `measure/` does not have yet), canonical k-mers, composition from the set,
+  and a mapping between amino-acid and nucleotide identity. Codon structure matters: third positions
+  vary most, so matches are periodic, which the chain does not model. Fit its own conservation.
+- **Larger k and sparsity in the grid.** The grid stops at k 13 and 1 in 128. Beyond k 13, base-21
+  codes overflow an int64, so hash k-mers (128-bit for nucleotide k above 31). Sparse settings need
+  more reads per bin, since few k-mers survive.
+- **Browser analysis for other alphabets.** It is protein only, rejects DNA and stops at k 13. Encode by
+  alphabet, with k limited by 63 bits / log2(letters) for nucleotide (31) and hashes beyond that.
+- **The remaining reduced alphabets** through `sim_grid.py --alphabet`, to test the 1.6× scale.
+
+**Phase 4: score, noise floor and precision, from shared k-mer tables.**
+
+- `measure/` writes, per index and k, a table of M by (identity bin, truth, relative identity), for
+  reads and decoys, on 1,000 or more queries. The page computes recall, others and precision from it for
+  any m and hit threshold, in milliseconds. M should also carry bit bands for kfp's per-key bits.
+- Controls: information bit floor, truth level (exact to x ≥ 0.5) and identity mix, including reads with
+  no relative. PR curve and AUPRC by sweeping the floor. A range for the hash draw.
+- A number of reads control with depth per target, and per-target precision. Untested.
+- Best-group assignment from a stored panel of reads, or from the grid at set values.
+- *Done when:* page values match a held-out simulation at settings not used for its tables.
+- The analytic model stays for what has no table: other k and quick exploration. Tables win where they exist.
 
 **Phase 5: index selection, scenarios and scale.** A selector for the index, with each index
 supplying its target lengths, group sizes and homologue spectrum (mini-slice and MGnify at first, a
@@ -396,7 +428,6 @@ by the user.
 
     | | Simulation | kfp |
     | --- | --- | --- |
-    | Groups per pair at identity ≥ 0.5 vs verified, m 8 | 16.0 | 16.1 |
     | Chance anchors per pair, 3 frames, m 8 | 0.013 | 0.014 |
     | Pair recall at 0.9, m 8 | 0.99 | 0.97 |
     | Pair recall at 0.9, m 16 | 0.94 | 0.88 |
@@ -405,7 +436,10 @@ by the user.
     16, identity 0.8: 0.80 against 0.65). Dense settings agree once kfp's 0.96 ceiling is applied. The
     simulation has no verification step and measures identity to the representative itself, not to a
     member of a larger group, which are likely causes, but neither has been tested. So the "done when" condition holds for
-    chance and group counts, and only partly for recall.
+    chance, and only partly for recall. **Correction (phase 3b):** this entry first reported 16.0
+    groups per pair at identity ≥ 0.5 against kfp's 16.1 verified. That agreement came from aligning
+    only 50 candidates per query. With 200 it is 30.2, so it does not support the simulation. The two
+    also count different things (whole-protein identity here, verified read windows in kfp).
   - **Recall model, not refitted:** RMSE 0.057 over the whole grid with the ceiling removed, against
     0.128 for independent mutations. Bias is within 0.005 at identity ≥ 0.8, but the model is too
     low by 0.096 near 0.55 and 0.07 near 0.65.
@@ -424,6 +458,93 @@ by the user.
     simulated precision is 0.01–0.05 per pair and the model's 0.03–0.12. So phase 4 reads precision
     from the grid, as this plan's fallback says.
   - The mini-slice is denser than the release, so none of these precision values transfer to it.
+
+- **2026-11-04: phase 3b.** Grids at 200 aligned candidates per query: `web/data/sim-grid.json`
+  (mini-slice) and `sim-grid-slice.json` (`tree-index-slice`, 1/16 of its units, 33,400 groups).
+  `measure/fit_rate.py` fits them. All three checks pass. Figures in the phase 3 entry used 50
+  candidates and no read rate, and this entry supersedes those on precision.
+  - **Read rate:** λ ~ Gamma(a, 1/a), fitted to true-group recall at k 6–9, m 8. Both sets give a = 4,
+    on a coarse grid of shapes, and each set's recall is unchanged under the other's. Both sets are
+    MGnify samples, though selected differently, so this is not yet evidence for other databases.
+    Recall RMSE on the rest of the grid: 0.044 and 0.043, against 0.064 without the rate. Model bias
+    at identity 0.6–0.85 is −0.03 to −0.05, and within 0.005 at 0.85 and above. The fit to kfp's table
+    stays at RMSE 0.029. The page uses it, at 23–60 ms per update.
+  - **Hits on aligned relatives per pair**, predicted with no further fitting: 35.5 against 36.2, 27.0
+    against 26.4, 14.6 against 14.7 and 21.3 against 20.3 on the mini-slice, at (k, m) = (7, 8), (9, 8),
+    (9, 32), (11, 8). On the slice: 30.9 against 31.1, 22.2 against 20.7, 10.9 against 10.3, 16.5
+    against 14.1.
+  - **Unaligned hits are real relatives.** Even with 200 candidates, 20–50% of other-group hits are
+    outside the aligned set, by set and setting. In samples at k 7 and k 9, m 8: 88–97% score above the 99th
+    percentile of decoy hits, and 75–86% are whole-protein relatives (identity and cover ≥ 0.3) that
+    were simply not among the candidates, and 5–9% were candidates below 0.3 cover.
+  - **Precision:** counting those hits as measured, predicted precision is within 20% of simulated
+    in `checks/test_grid.py` (for example 0.019 against 0.020 at k 9, m 8). Without them it is 1.1–1.7×
+    too high. So the model needs a complete homologue spectrum. Unfiltered precision is still only
+    0.01–0.04, and these sets are denser than the release.
+  - **Shared hash, partly solved:** `model.hit_both` handles a k-mer that two groups both hold, and
+    matches Monte Carlo. One share parameter does not fit: the best share rises from 0 at relative
+    identity below 0.6 to 1 at 0.8 and above. Those shares, fitted at k 9, m 8 on the mini-slice, reduce
+    the error of P(relative hit | true group missed) elsewhere: RMSE 0.09–0.14 from 0.16–0.21 on the
+    mini-slice, 0.10–0.12 from 0.16–0.18 on the slice (0.015 and 0.025 at m 32). This affects
+    how many reads are ambiguous, not pooled precision. Not on the page.
+  - **Next, for phase 4:** make the spectrum complete, by aligning more candidates or estimating the
+    count from hits, and read a and the spectrum per index. Local identity (per read window) may
+    replace whole-protein identity for relatives, which is untested.
+
+- **2026-11-04: wider ranges and alphabets.** The page now covers k 1–31 (1–51 for nucleotide),
+  sparsity up to 1 in 8,192 (2¹³, the closest to 9,000), nucleotide mode and 19 reduced protein alphabets
+  (kfp's classes), and shows chance bits per k-mer. The chain matches Monte Carlo at k 1, 31 and 51.
+  - **Chance:** class frequencies predict decoys. Decoys over composition at m 8 are 1.0–1.5 for
+    murphy10 at k 7–11, and 1.05–1.6 for seb8 and dayhoff at k 8–11. It rises above that at k 13 (4.3
+    for murphy10).
+  - **Recall:** BLOSUM62 understates substitutions staying within a class. Best fits are 0.38 against
+    0.23 (murphy10) and 0.52 against 0.33 (dayhoff). So the model scales within-class shares by 1.6.
+    Recall RMSE: 0.033 and 0.031, from 0.071 and 0.097. seb8, not used for the scale, gives 0.030, from
+    0.079. The other 16 alphabets are untested. `sim_grid.py --alphabet` runs any of them.
+  - **Reduced alphabets at matched chance:** on the mini-slice at m 8, protein k 7 (28.5 bits) has 0.54
+    decoys per pair and recall 0.36 / 0.80 / 0.97 at identity 0.55 / 0.72 / 0.82. murphy10 k 11 (30.0 bits)
+    has 0.14 and 0.27 / 0.75 / 0.96, and dayhoff k 13 (27.6 bits) has 0.97 and 0.34 / 0.75 / 0.96. This
+    shows no clear gain, in line with kfp's result for murphy10.
+
+- **2026-11-04: what precision needs.** `measure/precision_tables.py`, on the mini-slice and
+  `tree-index-slice` (4,050 read pairs each, protein reads, k 7, 9, 11, one set of representatives).
+  - **The sufficient statistic is M,** the distinct k-mers a read pair shares with a group at full
+    density. Each is kept at 1/m, so hits ~ Binomial(M, 1/m). A table of M by (identity bin, truth,
+    relative identity) from one dense pass gives recall, others and precision at every m and hit
+    threshold, with no alignment beyond labels. Against real hash sampling averaged over 8 salts, at m
+    8 and 32: recall within 0.006, and others and precision within 10% where counts are common, up to
+    about 17% in rare settings, where 8 salts is itself noisy.
+  - **One index is one hash draw.** Sd across salts: precision ±5% at m 8, h 1; ±11–40% at m 32, h 3
+    (0.093 ± 0.037 on the mini-slice at k 9). A few popular k-mers cause this, and the page should
+    show it as a range.
+  - **A score does not work as the link.** At the same ungapped score, hit rates differ 2–3× between
+    relatives (k 9, m 8, S 150–200: 0.28 at x < 0.5, 0.67 at x ≥ 0.7). The tables built on it were
+    20–30% off, and about 35% on another set. Removed.
+  - **Truth level and rule matter most.** k 9, m 8, precision against the true group only, or also
+    relatives at x ≥ 0.9, 0.7, 0.5:
+
+    | Rule | Set | Recall | Exact | 0.9 | 0.7 | 0.5 |
+    | --- | --- | --- | --- | --- | --- | --- |
+    | Any anchor | mini | 0.80 | 0.02 | 0.12 | 0.41 | 0.80 |
+    | ≥ 5 hits | mini | 0.44 | 0.06 | 0.43 | 0.87 | 0.98 |
+    | Best score | mini | 0.54 | 0.18 | 0.72 | 0.93 | 0.99 |
+    | Any anchor | slice | 0.78 | 0.03 | 0.05 | 0.24 | 0.72 |
+    | ≥ 5 hits | slice | 0.41 | 0.16 | 0.36 | 0.77 | 0.99 |
+    | Best score | slice | 0.57 | 0.44 | 0.62 | 0.84 | 0.97 |
+
+    A read-level score bar hardly helps: S ≥ 100 leaves others per pair almost unchanged (39.7 to 38.4),
+    since nearly all anchors are on homologues. It removes chance, which is rare at k ≥ 9.
+  - **Best-group assignment is not predicted by M.** Thinning each group independently gives
+    precision 0.29 against 0.14 (k 9, m 8), and 0.17 against 0.07 at m 32, because k-mers shared across
+    groups are kept or dropped together. It needs the read × k-mer × group incidence, for example
+    a stored panel of reads thinned by salted hash.
+  - **Reads needed:** relative sd of precision is 0.21 at 100 queries, 0.15 at 200, 0.11 at 400 (k 7). So
+    use about 1,000 or more.
+  - **Scale is not answered.** Removing groups at random here gives others ∝ groups (exponents
+    0.98–1.03), but that is true by construction. Real growth needs the scale profile's uniform samples.
+  - **Also not covered:** reads with no relative (8–10% of queries here, more in real samples), translated
+    frames and read errors, per-target precision across reads, per-key bits in the floor (kfp's bits vary
+    by key, so M would need bit bands), and kfp's own key policies and verification.
 
 ## Licence
 

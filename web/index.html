@@ -31,12 +31,27 @@
 <body>
 <h1>kfp-explore: anchor recall</h1>
 <form id="controls">
-  <label>k <span id="k-out"></span><input type="range" id="k" min="3" max="15" step="1" value="9"></label>
-  <label>Sparsity, 1 in m <span id="m-out"></span><input type="range" id="m" min="0" max="8" step="1" value="3"></label>
-  <label>Read length, residues per mate <span id="length-out"></span><input type="range" id="length" min="10" max="300" step="5" value="50"></label>
+  <label>k <span id="k-out"></span><input type="range" id="k" min="1" max="31" step="1" value="9"></label>
+  <label>Sparsity, 1 in m <span id="m-out"></span><input type="range" id="m" min="0" max="13" step="1" value="3"></label>
+  <label>Read length, letters per mate <span id="length-out"></span><input type="range" id="length" min="10" max="300" step="5" value="50"></label>
   <label>Identity to the indexed group <span id="identity-out"></span><input type="range" id="identity" min="0.5" max="1" step="0.01" value="0.9"></label>
   <label>Database, proteins <span id="proteins-out"></span><input type="range" id="proteins" min="4" max="11" step="0.1" value="9.8"></label>
   <label>Representative share <span id="rep_share-out"></span><input type="range" id="rep_share" min="0.05" max="1" step="0.005" value="0.155"></label>
+  <label>Alphabet
+    <select id="alphabet">
+      <option value="protein">Protein (20)</option>
+      <option value="dna">Nucleotide (4)</option>
+      <optgroup label="Reduced protein">
+        <option value="murphy15">murphy15</option><option value="seb14">seb14</option><option value="opt14">opt14</option>
+        <option value="murphy12">murphy12</option><option value="opt12">opt12</option><option value="diamond11">diamond11</option>
+        <option value="murphy10">murphy10</option><option value="seb10">seb10</option><option value="sev10">sev10</option>
+        <option value="lia10">lia10</option><option value="lib10">lib10</option><option value="opt10">opt10</option>
+        <option value="murphy8">murphy8</option><option value="seb8">seb8</option><option value="opt8">opt8</option>
+        <option value="dayhoff">dayhoff (6)</option><option value="seb6">seb6</option><option value="opt6">opt6</option>
+        <option value="opt4">opt4</option>
+      </optgroup>
+    </select>
+  </label>
   <label><input type="checkbox" id="paired" checked> Paired reads</label>
 </form>
 <div id="status" role="status">Loading Pyodide and NumPy…</div>
@@ -45,14 +60,20 @@
   <div>Index size<b id="index">–</b></div>
   <div>Postings<b id="postings">–</b></div>
   <div>Chance anchors per read<b id="chance">–</b></div>
+  <div>Chance bits per k-mer<b id="bits">–</b></div>
 </div>
 <div id="plots"><div id="plot-identity"></div><div id="plot-m"></div></div>
 <p class="note" id="grid-note"></p>
 <p class="note">Model: k-mer anchors on group representatives, with conserved and variable blocks
-fitted to kfp's 90%-AAI table (recall ceiling 0.96). Index size assumes 225 residues per
+fitted to kfp's 90%-AAI table (recall ceiling 0.96), and a conservation rate shared by each read
+fitted to the simulation. Index size assumes 225 residues per
 representative and 6 bytes per posting; the representative share is held fixed as the database
 grows, which is a stand-in until the scale profile is measured. Chance assumes 3 frames per read,
-with a measured correction at k 5–9 and composition alone (a lower bound) elsewhere.</p>
+with a measured correction at protein k 5–9 and composition alone (a lower bound) elsewhere.
+Reduced alphabets raise identity by the share of substitutions staying within a class (from BLOSUM62,
+scaled 1.6× to fit simulated reads on three alphabets), and lower chance by class frequencies. Nucleotide mode reads identity as nucleotide identity, assumes 3
+letters per residue and uniform bases, and uses conservation fitted on protein with no codon
+structure, so treat it as a rough guide.</p>
 <h2>Analyse a protein set</h2>
 <form id="analysis-controls">
   <label>Set

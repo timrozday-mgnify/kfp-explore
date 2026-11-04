@@ -22,18 +22,31 @@ from kmer_functional_profiler import _core
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "web"))
 import analyse  # noqa: E402
+import model  # noqa: E402
 
 BINS = np.array([0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.98, 1.0001])  # lower edges, then the top
 RELATIVE_BINS = np.array([0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0001])
 UNALIGNED = len(RELATIVE_BINS) - 1  # a group hit but not among the query's aligned candidates
 LEVELS = 8  # m = 1, 2, ... 128
 MATE, GAP = 50, 40
+EXPLAIN = {7: 3, 9: 3}  # k: level (m = 2^level) at which hits outside the aligned relatives are explained
+EXPLAIN_HITS = 20_000
 MAX_RSS_GB = 6
 
 
-def code(seqs):
+def alphabet_table(name):
+    """Bytes to letters: amino acids, or a reduced alphabet's classes."""
+    table = analyse.ENCODE.copy()
+    if name != "protein":
+        for g, members in enumerate(model.REDUCED[name].split()):
+            for aa in members:
+                table[ord(aa)] = g
+    return table
+
+
+def code(seqs, table=analyse.ENCODE):
     """Encoded sequences joined by separators."""
-    return analyse.ENCODE[np.frombuffer(b"*".join(seqs), np.uint8)]
+    return table[np.frombuffer(b"*".join(seqs), np.uint8)]
 
 
 def level(x):
@@ -45,9 +58,9 @@ def level(x):
     return np.minimum(np.log2((z & (~z + np.uint64(1))).astype(float) + (z == 0)).astype(np.int8), LEVELS - 1)
 
 
-def postings_index(seqs, k):
+def postings_index(seqs, k, table):
     """Sorted distinct (k-mer, group), with each k-mer's first row and row count."""
-    a = code(seqs)
+    a = code(seqs, table)
     x, at = analyse.kmers(a, k)
     group = np.cumsum(a == analyse.SEPARATOR)[at]
     o = np.lexsort((group, x))
@@ -107,8 +120,46 @@ def candidates(queries, reps, top):
     return qs[rank < top], gs[rank < top]
 
 
+def explain(query, index, pair_q, source, hits, decoys, known, matrix):
+    """What hits outside a query's aligned relatives are: ``hits`` and ``decoys`` are (pair, group)
+    samples. Scores are each pair's best mate on the group (ungapped BLOSUM62, every diagonal), so
+    decoys show what chance scores. ``known`` holds all aligned (query, group) keys, any cover."""
+    def scores(pairs, mates):
+        a = [mates[2 * p + j] for p, _ in pairs for j in (0, 1)]
+        b = [index[g] for _, g in pairs for _ in (0, 1)]
+        return np.asarray(_core.align_ungapped(a, b, matrix)).reshape(-1, 2).max(1)
+
+    if not len(hits):
+        return {"hits": 0}
+    hit_scores = scores(hits, source["mates"])
+    decoy_scores = scores(decoys, source["decoys"]) if len(decoys) else np.zeros(1)
+    bar = float(np.quantile(decoy_scores, 0.99))
+    qs = np.array([pair_q[p] for p, _ in hits])
+    gs = np.array([g for _, g in hits])
+    full = _core.align_identity([query[q] for q in qs], [index[g] for g in gs])
+    identity = np.asarray(full["identity"], float)
+    cover = np.asarray(full["columns"], float) / np.array([len(query[q]) for q in qs])
+    low_cover = np.isin(qs * (len(index) + 2) + gs, known)
+    return {
+        "hits": len(hits),
+        "decoys": len(decoys),
+        "decoy_bar": bar,
+        "share_above_decoy_bar": float((hit_scores > bar).mean()),
+        "share_in_candidates_low_cover": float(low_cover.mean()),
+        "share_outside_candidates": float((~low_cover).mean()),
+        "share_relative_outside_candidates": float(((~low_cover) & (cover >= 0.3) & (identity >= 0.3)).mean()),
+        "median_identity": float(np.median(identity)),
+        "median_cover": float(np.median(cover)),
+        "score_quantiles": np.quantile(hit_scores, [0.1, 0.5, 0.9]).tolist(),
+        "decoy_score_quantiles": np.quantile(decoy_scores, [0.1, 0.5, 0.9]).tolist(),
+    }
+
+
 def choose(members, a, rng):
     """Queries, indexed representatives, each query's aligned relatives and its true group."""
+    if a.unit_fraction < 1:
+        units = members["cluster_rep"].unique().sort().sample(fraction=a.unit_fraction, seed=a.seed)
+        members = members.filter(pl.col("cluster_rep").is_in(units.to_list()))
     reps = members.filter(pl.col("protein_id") == pl.col("cluster_rep"))
     lengths = pl.col("sequence").str.len_chars()
     pool = reps.filter(lengths.is_between(MATE * 2 + GAP, 1000))
@@ -141,6 +192,8 @@ def main():
     p.add_argument("--pairs", type=int, default=10, help="read pairs per query")
     p.add_argument("--top", type=int, default=50, help="relatives aligned per query")
     p.add_argument("--ks", default="5,6,7,8,9,11")
+    p.add_argument("--alphabet", default="protein", help="protein or a name in model.REDUCED")
+    p.add_argument("--unit-fraction", type=float, default=1.0, help="MGnify90 units kept, for larger sets")
     p.add_argument("--seed", type=int, default=1)
     a = p.parse_args()
     rng = np.random.default_rng(a.seed)
@@ -171,6 +224,7 @@ def main():
     rel_bin = np.digitize(identity[ok], RELATIVE_BINS) - 1
     o = np.argsort(rel_key)
     rel_key, rel_bin = rel_key[o], rel_bin[o]
+    aligned_keys = qs * (n_g + 2) + gs
     spectrum = np.zeros((n_q, UNALIGNED + 1))
     np.add.at(spectrum, (qs[ok], np.digitize(identity[ok], RELATIVE_BINS) - 1), 1)
     true_bin = np.digitize(best_id[has], RELATIVE_BINS) - 1
@@ -191,10 +245,14 @@ def main():
     n_pairs = len(pair_q)
     n_bins, n_rel = len(BINS) - 1, UNALIGNED + 1
 
+    table = alphabet_table(a.alphabet)
     rows = []
+    explained = {}
+    matrix = None
     for k in map(int, a.ks.split(",")):
+        hit_sample, decoy_sample = [], []
         t0 = time.perf_counter()
-        idx = postings_index(index, k)
+        idx = postings_index(index, k, table)
         postings = np.bincount(level(idx[0])[np.repeat(np.arange(len(idx[0])), idx[2])], minlength=LEVELS)
         postings = postings[::-1].cumsum()[::-1]
         hits_true = np.zeros((LEVELS, n_bins))
@@ -211,7 +269,7 @@ def main():
             ids = pair_ids[start : start + batch]
             for kind, source in (("reads", mates), ("decoys", decoys)):
                 seqs = [source[2 * i + j] for i in ids for j in (0, 1)]
-                encoded = code(seqs)
+                encoded = code(seqs, table)
                 x, at = analyse.kmers(encoded, k)
                 owner = (np.cumsum(encoded == analyse.SEPARATOR)[at] // 2).astype(np.int64)
                 key, lv = lookup(x, owner, idx)
@@ -222,6 +280,9 @@ def main():
                 if kind == "decoys":
                     for j in range(LEVELS):
                         decoy_anchors[j] += (lv >= j).sum()
+                    if a.alphabet == "protein" and k in EXPLAIN:
+                        on = np.flatnonzero(lv >= EXPLAIN[k])
+                        decoy_sample += list(zip(ids[pair_of[on]].tolist(), group[on].tolist(), strict=True))
                     continue
                 query_of = pair_q[ids][pair_of]
                 is_true = group == best[query_of]
@@ -231,6 +292,9 @@ def main():
                 rel[rel == len(rel_key)] = 0
                 known = rel_key[rel] == wanted
                 x_bin = np.where(known, rel_bin[rel], UNALIGNED)
+                if a.alphabet == "protein" and k in EXPLAIN:
+                    on = np.flatnonzero((lv >= EXPLAIN[k]) & ~known & ~is_true)
+                    hit_sample += list(zip(ids[pair_of[on]].tolist(), group[on].tolist(), strict=True))
                 best_level = np.full(len(ids), -1, np.int64)
                 np.maximum.at(best_level, pair_of[is_true], lv[is_true])
                 for j in range(LEVELS):
@@ -247,6 +311,23 @@ def main():
             rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**30
             if rss > MAX_RSS_GB:
                 raise SystemExit(f"over {MAX_RSS_GB} GB")
+        if a.alphabet == "protein" and k in EXPLAIN:
+            if matrix is None:
+                from Bio.Align import substitution_matrices
+
+                table = substitution_matrices.load("BLOSUM62")
+                matrix = np.full(1 << 16, -4, np.int8)
+                for x_aa in analyse.AMINO.decode():
+                    for y_aa in analyse.AMINO.decode():
+                        matrix[ord(x_aa) << 8 | ord(y_aa)] = int(table[x_aa][y_aa])
+            pick = np.random.default_rng(k)
+            hit_sample = [hit_sample[i] for i in pick.permutation(len(hit_sample))[:EXPLAIN_HITS]]
+            decoy_sample = [decoy_sample[i] for i in pick.permutation(len(decoy_sample))[:EXPLAIN_HITS]]
+            explained[k] = {"m": 2 ** EXPLAIN[k]} | explain(
+                query, index, pair_q, {"mates": mates, "decoys": decoys}, hit_sample, decoy_sample,
+                aligned_keys, matrix,
+            )
+            print(f"k {k} unaligned hits:", explained[k], flush=True)
         counted = np.bincount(bin_of[pair_q[pair_ids]], minlength=n_bins)
         for j in range(LEVELS):
             rows.append({
@@ -268,6 +349,7 @@ def main():
     per_query = [spectrum[chosen[chosen_bins == b]].mean(0).tolist() if (chosen_bins == b).any() else [0] * n_rel for b in range(n_bins)]
     Path(a.out).write_text(json.dumps({
         "source": str(a.members),
+        "alphabet": a.alphabet,
         "groups": n_g,
         "queries": len(chosen),
         "pool": n_q,
@@ -281,6 +363,7 @@ def main():
         "mean_identity": [float(best_id[chosen[chosen_bins == b]].mean()) if (chosen_bins == b).any() else None for b in range(n_bins)],
         "relative_bins": RELATIVE_BINS.tolist(),
         "relatives_per_query": per_query,
+        "unaligned_explained": explained,
         "rows": rows,
     }))
     print("wrote", a.out, flush=True)

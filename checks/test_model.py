@@ -38,9 +38,9 @@ def monte_carlo(length, k, m, p, conservation, n=200_000, seed=1):
     return 1 - hit.mean()
 
 
-def rmse(rows, conservation, ceiling):
+def rmse(rows, conservation, ceiling, shape=None):
     errors = [
-        model.recall(50, k, m, P, True, conservation, ceiling) - np.array(seen)
+        model.recall(50, k, m, P, True, conservation, ceiling, shape) - np.array(seen)
         for k, m, _, _, seen in rows
     ]
     return float(np.sqrt(np.mean(np.square(errors))))
@@ -71,6 +71,23 @@ def main():
 
     assert abs(model.miss(5, 9, 1, 1.0) - 1) < 1e-9  # read shorter than k
     assert abs(model.miss(50, 9, 1, 1.0)) < 1e-9  # identical read, nothing sampled away
+    for length, k, m, p in [(50, 1, 8192, 0.7), (150, 31, 2, 0.98), (150, 31, 8192, 1.0)]:
+        chain = float(model.miss(length, k, m, p))
+        simulated = monte_carlo(length, k, m, p, model.CONSERVATION)
+        print(f"chain {chain:.4f}, simulated {simulated:.4f}: L{length} k{k} m{m} p{p}")
+        assert abs(chain - simulated) < 0.005
+
+    assert (model.BLOSUM62 == model.BLOSUM62.T).all()
+    assert model.alphabet_stats("protein")[0] == 20 and model.alphabet_stats("protein")[2] == 0
+    assert abs(model.alphabet_stats("protein")[1] - model.S2) < 2e-4
+    assert all(sorted("".join(v.split())) == sorted(model.AMINO) for v in model.REDUCED.values())
+    assert model.alphabet_stats("dna") == (4, 0.25, 0.0)
+    assert abs(model.miss(150, 51, 1, 1.0)) < 1e-9
+    assert abs(float(model.miss(150, 51, 8, 0.99)) - monte_carlo(150, 51, 8, 0.99, model.CONSERVATION)) < 0.005
+    for name, letters in [("murphy10", 10), ("dayhoff", 6)]:
+        n, s2, within = model.alphabet_stats(name)
+        print(f"{name}: {n} letters, {-np.log2(s2):.2f} bits, within {within:.3f}")
+        assert n == letters and within > model.alphabet_stats("murphy15")[2]
 
     train = [r for r in TABLE if r[1] == 8]
     test = [r for r in TABLE if r[1] == 16]
@@ -81,6 +98,9 @@ def main():
           f"held-out m 16 {held_out:.3f}, independent {independent:.3f}")
     assert (conservation, ceiling) == (model.CONSERVATION, model.CEILING)
     assert held_out < 0.04 and independent > 0.06
+    with_rate = rmse(TABLE, conservation, ceiling, model.READ_RATE)
+    print(f"with the read rate: {with_rate:.3f}")
+    assert with_rate < 0.04
 
     for k, m, n_postings, seen, _ in TABLE:
         base, corrected = model.chance_anchors(50, k, n_postings)

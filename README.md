@@ -16,6 +16,7 @@ python3 -m http.server 8765 --bind 127.0.0.1 -d web  # then open http://127.0.0.
 uv run --no-project --with numpy python checks/test_model.py  # model against Monte Carlo and kfp's tables
 uv run --no-project --with numpy python checks/test_analyse.py  # analysis against the pilot and random sequences
 uv run --no-project --with numpy python checks/test_grid.py  # simulation grid against the model and kfp
+uv run --no-project --with numpy python measure/fit_rate.py web/data/sim-grid.json web/data/sim-grid-slice.json  # fit the read rate on each set
 ```
 
 Licence: GPL-3.0-or-later.

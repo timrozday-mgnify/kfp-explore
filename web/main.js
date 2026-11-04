@@ -1,6 +1,6 @@
 // @ts-check
 /* global Plotly */
-const IDS = ['k', 'm', 'length', 'identity', 'proteins', 'rep_share'];
+const IDS = ['alphabet', 'k', 'm', 'length', 'identity', 'proteins', 'rep_share']; // alphabet first: it sets k's range
 const el = (id) => /** @type {HTMLInputElement} */ (document.getElementById(id));
 
 const compact = (x) => (x >= 1e4 || (x > 0 && x < 0.01) ? x.toExponential(1).replace('e+', 'e') : x >= 100 ? x.toFixed(0) : x.toPrecision(2));
@@ -14,6 +14,7 @@ function params() {
     identity: +el('identity').value,
     proteins: 10 ** +el('proteins').value,
     rep_share: +el('rep_share').value,
+    alphabet: el('alphabet').value,
     paired: el('paired').checked,
   };
 }
@@ -32,10 +33,12 @@ const LAYOUT = { margin: { t: 36, r: 12, b: 48, l: 56 }, legend: { orientation: 
 const CONFIG = { responsive: true, displaylogo: false };
 
 // Simulated points (measure/sim_grid.py): read pairs of real relatives, at the grid's settings.
-let grid = null;
+const GRID_FILES = { protein: 'sim-grid', murphy10: 'sim-grid-murphy10', dayhoff: 'sim-grid-dayhoff', seb8: 'sim-grid-seb8' };
+const grids = {};
 const SIMULATED = { name: 'Simulated (mini-slice)', mode: 'markers', marker: { color: '#e08e0b', size: 9, symbol: 'diamond' } };
 
 function gridForIdentity(p) {
+  const grid = grids[p.alphabet];
   if (!grid || !p.paired || p.length !== grid.mate) return [];
   const row = grid.rows.find((x) => x.k === p.k && x.m === p.m);
   if (!row) return [];
@@ -44,6 +47,7 @@ function gridForIdentity(p) {
 }
 
 function gridForSparsity(p) {
+  const grid = grids[p.alphabet];
   if (!grid || !p.paired || p.length !== grid.mate) return [];
   const b = grid.identity_bins.findIndex((low, i) => p.identity >= low && p.identity < grid.identity_bins[i + 1]);
   const rows = grid.rows.filter((x) => x.k === p.k);
@@ -55,17 +59,18 @@ function draw(r, p) {
   el('recall').textContent = r.recall.toFixed(3);
   el('index').textContent = size(r.index_gb);
   el('postings').textContent = r.postings.toExponential(1).replace('e+', 'e');
+  el('bits').textContent = `${r.bits_per_kmer.toFixed(1)} (${r.bits_per_letter.toFixed(2)} per letter)`;
   el('chance').textContent = r.chance === 0 ? '0' : r.chance_corrected === null ? `≥ ${compact(r.chance)}` : compact(r.chance_corrected);
 
   Plotly.react('plot-identity', [
-    { x: r.identity, y: r.by_identity, name: 'Conserved blocks (fitted)', mode: 'lines', line: { color: '#1f6fb2' } },
+    { x: r.identity, y: r.by_identity, name: 'Model', mode: 'lines', line: { color: '#1f6fb2' } },
     { x: r.identity, y: r.by_identity_independent, name: 'Independent mutations', mode: 'lines', line: { color: '#888', dash: 'dot' } },
     { x: [p.identity], y: [r.recall], name: 'Selected', mode: 'markers', marker: { color: '#c0392b', size: 10 } },
     ...gridForIdentity(p),
   ], {
     ...LAYOUT,
     uirevision: 1,
-    title: { text: `Recall by identity (k ${p.k}, 1 in ${p.m}, ${p.length} aa)`, font: { size: 14 } },
+    title: { text: `Recall by identity (${p.alphabet}, k ${p.k}, 1 in ${p.m}, ${p.length} letters)`, font: { size: 14 } },
     xaxis: { ...AXIS, title: { text: 'Identity' }, range: [0.5, 1] },
     yaxis: { ...AXIS, title: { text: 'Anchor recall' }, range: [0, 1] },
   }, CONFIG);
@@ -82,15 +87,18 @@ function draw(r, p) {
   }, ...gridForSparsity(p)]), {
     ...LAYOUT,
     uirevision: 1,
-    title: { text: `Recall by sparsity (identity ${p.identity.toFixed(2)}, ${p.length} aa)`, font: { size: 14 } },
-    xaxis: { ...AXIS, title: { text: 'Sparsity, 1 in m' }, type: 'log', dtick: Math.log10(2) },
+    title: { text: `Recall by sparsity (${p.alphabet}, identity ${p.identity.toFixed(2)}, ${p.length} letters)`, font: { size: 14 } },
+    xaxis: { ...AXIS, title: { text: 'Sparsity, 1 in m' }, type: 'log', dtick: Math.log10(4) },
     yaxis: { ...AXIS, title: { text: 'Anchor recall' }, range: [0, 1] },
   }, CONFIG);
 }
 
 // The URL holds the controls, so a view can be shared.
 const query = new URLSearchParams(location.search);
-for (const id of IDS) if (query.has(id)) el(id).value = /** @type {string} */ (query.get(id));
+for (const id of IDS) {
+  if (query.has(id)) el(id).value = /** @type {string} */ (query.get(id));
+  if (id === 'alphabet') el('k').max = el('alphabet').value === 'dna' ? '51' : '31';
+}
 if (query.has('paired')) el('paired').checked = query.get('paired') === '1';
 
 const worker = new Worker('worker.js');
@@ -112,6 +120,7 @@ worker.onmessage = ({ data }) => {
 };
 
 function update() {
+  el('k').max = el('alphabet').value === 'dna' ? '51' : '31'; // the browser clamps k to this
   latest = params();
   showInputs(latest);
   const q = new URLSearchParams(IDS.map((id) => [id, el(id).value]));
@@ -123,14 +132,19 @@ function update() {
 el('controls').addEventListener('input', update);
 update();
 
+for (const [alphabet, file] of Object.entries(GRID_FILES)) {
+  fetch(`data/${file}.json`).then((r) => (r.ok ? r.json() : null)).then((g) => {
+    if (g) { grids[alphabet] = g; update(); }
+  }).catch(() => {});
+}
+
 fetch('data/sim-grid.json').then((r) => (r.ok ? r.json() : null)).then((g) => {
-  grid = g;
   if (!g) return;
   el('grid-note').textContent = `Simulated points: ${g.pairs.toLocaleString()} read pairs from ${g.queries.toLocaleString()} proteins against `
     + `${g.groups.toLocaleString()} groups, without verification; shown for paired reads of ${g.mate} aa, `
     + `k ${[...new Set(g.rows.map((x) => x.k))].join(', ')}, 1 in 1–${Math.max(...g.rows.map((x) => x.m))}. `
-    + 'The model keeps kfp\'s recall ceiling of 0.96, which comes from representatives of larger groups.';
-  update();
+    + 'The model keeps kfp\'s recall ceiling of 0.96, which comes from representatives of larger groups. '
+    + 'Also simulated, at fewer settings: murphy10, dayhoff and seb8.';
 }).catch(() => {});
 
 // Analysis of a protein set
