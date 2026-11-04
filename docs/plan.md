@@ -283,7 +283,8 @@ reversed here where kfp reverses reads.
 | Collisions between units / composition | 3.2 | 25 | 306 | 4,195 | 60,106 |
 
 - Decoy rates match kfp at k 6–7. At k 8–9 a few k-mers dominate (the top 1% give 62–87% of hits),
-  so this sample size cannot estimate them.
+  so this sample size cannot estimate them. These figures reverse the whole set; see the phase 2
+  entry in the progress log for half-set decoys.
 - Above k 5, matches between units are overwhelmingly homology, not chance. This makes the homologue
   spectrum the most important measurement.
 - Representative lengths: 5–95% 65–707 aa, E[L²] / E[L]² = 2.6. Length alone therefore explains part
@@ -316,7 +317,7 @@ Phases 1–3 are the plan. The rest is a backlog, reordered as questions come up
 - Readouts: index size at a chosen database size, and chance anchors per read.
 - *Done when:* the check's tolerances hold, and slider moves redraw with no visible lag in a browser.
 
-Phase 1 is built. Nothing below it has started.
+Phases 1 and 2 are built. Nothing below them has started.
 
 **Phase 2: analyse a small set in the browser.**
 
@@ -370,6 +371,20 @@ by the user.
   - In the desktop app's browser pane: start-up 1.3 s (5.7 s on another load), compute 23–105 ms.
     During a simulated 2 s drag the page drew 19 times, about 10 per second, with the longest
     main-thread gap at 197 ms. Whether this counts as no visible lag is for the user to judge.
+
+- **2026-11-04: phase 2.** The page analyses a bundled mini-slice sample (10 k or 44 k representatives,
+  `measure/make_samples.py`) or a FASTA file in the browser: lengths, composition, spectrum, decoys,
+  matches between halves and rarefaction, each beside what independent residues would give.
+  - The 44 k set takes 14 s in the desktop app's browser pane, at most 3.4 s per step. The 10 k set
+    takes 5 s. During a run, the model's sliders wait for the current step (3.5 s when timed).
+  - `checks/test_analyse.py` passes: distinct shares and matches between halves agree with the pilot,
+    and random sequences match the independent-residue values.
+  - Decoys changed from a whole set reversed to one half reversed against the other, because a set
+    matches its own palindromes (1.18 at k 7 on random sequences, 1.10 after, 1.00 expected, with
+    the rest probably noise). Against the pilot: 1.23, 1.40, 1.90, 4.29, 28.4 at k 5–9. So the
+    self matches explain little, and k 8–9 stay far above kfp's correction in a set this small.
+  - Not included: a sampled index and simulated reads, listed under "Analysing a small set in the
+    browser". Simulated reads need realistic divergence to say anything, so they stay with phase 3.
 
 ## Licence
 

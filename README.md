@@ -5,7 +5,8 @@ precision and recall, for different index sizes, read lengths and homologue stru
 on the methods of [kmer-functional-profiler](https://github.com/timrozday-mgnify/kmer-functional-profiler).
 
 Early stage: see [the plan](docs/plan.md). The page shows anchor recall, index size and chance
-anchors from an analytic model, which runs in the browser with NumPy in Pyodide.
+anchors from an analytic model, and analyses a small protein set (a bundled sample or your own
+FASTA). Both run in the browser with NumPy in Pyodide.
 
 ```bash
 python3 -m http.server 8765 --bind 127.0.0.1 -d web  # then open http://127.0.0.1:8765/
@@ -13,6 +14,7 @@ python3 -m http.server 8765 --bind 127.0.0.1 -d web  # then open http://127.0.0.
 
 ```bash
 uv run --no-project --with numpy python checks/test_model.py  # model against Monte Carlo and kfp's tables
+uv run --no-project --with numpy python checks/test_analyse.py  # analysis against the pilot and random sequences
 ```
 
 Licence: GPL-3.0-or-later.

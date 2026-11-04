@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>kfp-explore</title>
 <style>
+  [hidden] { display: none !important; }
   body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #fff; color: #222; }
   h1 { font-size: 18px; margin: 0 0 8px; }
   form { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px 24px; }
@@ -17,6 +18,14 @@
   #plots { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 8px; }
   #plots > div { height: 380px; }
   p.note { color: #666; max-width: 70em; }
+  h2 { font-size: 16px; margin: 24px 0 8px; border-top: 1px solid #ddd; padding-top: 16px; }
+  #analysis-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+  #analysis-controls label { min-width: 0; }
+  #analysis-plots { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 8px; margin-top: 8px; }
+  #analysis-plots > div { height: 340px; }
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; font-variant-numeric: tabular-nums; margin: 8px 0; }
+  th, td { padding: 2px 10px; text-align: right; border-bottom: 1px solid #eee; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -43,6 +52,31 @@ fitted to kfp's 90%-AAI table (recall ceiling 0.96). Index size assumes 225 resi
 representative and 6 bytes per posting; the representative share is held fixed as the database
 grows, which is a stand-in until the scale profile is measured. Chance assumes 3 frames per read,
 with a measured correction at k 5–9 and composition alone (a lower bound) elsewhere.</p>
+<h2>Analyse a protein set</h2>
+<form id="analysis-controls">
+  <label>Set
+    <select id="sample">
+      <option value="data/mini-slice-10k.fa.gz">Mini-slice, 10 k representatives (1.7 MB)</option>
+      <option value="data/mini-slice-44k.fa.gz">Mini-slice, 44 k representatives (7.4 MB)</option>
+      <option value="file">My FASTA file…</option>
+    </select>
+  </label>
+  <label id="file-label" hidden>File <input type="file" id="file" accept=".fa,.faa,.fasta,.gz"></label>
+  <label>Rarefaction k <input type="number" id="rarefy-k" min="1" max="13" value="7"></label>
+  <button type="submit" id="analyse">Analyse</button>
+</form>
+<div id="analysis-status" role="status"></div>
+<div id="analysis-summary"></div>
+<div class="table-wrap"><table id="spectrum-table" hidden></table></div>
+<div id="analysis-plots" hidden>
+  <div id="plot-lengths"></div><div id="plot-composition"></div><div id="plot-distinct"></div>
+  <div id="plot-collisions"></div><div id="plot-rarefy"></div><div id="plot-decoys"></div>
+</div>
+<p class="note">Runs in this browser; files are not uploaded. Sets over 20 M residues are sampled at
+random to stay within wasm's memory. "Independent" is what independent residues with this set's
+composition would give. Decoys are one random half's sequences reversed, matched to the other half.
+Between halves counts matches between sequences of the two halves, so with homologues it is far
+above chance. Above k 7 in a set this small, a few k-mers dominate the decoy rate.</p>
 <script src="https://cdn.jsdelivr.net/npm/plotly.js-basic-dist-min@2.35.2/plotly-basic.min.js"></script>
 <script src="main.js"></script>
 </body>

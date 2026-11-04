@@ -28,7 +28,7 @@ function showInputs(p) {
 }
 
 const AXIS = { zeroline: false, automargin: true };
-const LAYOUT = { margin: { t: 36, r: 12, b: 48, l: 56 }, legend: { orientation: 'h', y: -0.2 } };
+const LAYOUT = { margin: { t: 36, r: 12, b: 48, l: 56 }, legend: { orientation: 'h', y: -0.3 } };
 const CONFIG = { responsive: true, displaylogo: false };
 
 function draw(r, p) {
@@ -78,7 +78,9 @@ let latest = params();
 let startup = 0;
 
 worker.onmessage = ({ data }) => {
-  if (data.error) {
+  if (data.job !== undefined) {
+    onAnalysis(data);
+  } else if (data.error) {
     status.textContent = `Error: ${data.error}`;
   } else if (data.ready) {
     startup = data.ready;
@@ -99,3 +101,113 @@ function update() {
 
 el('controls').addEventListener('input', update);
 update();
+
+// Analysis of a protein set
+const KFP_CORRECTION = { 5: 1.2, 6: 1.3, 7: 1.5, 8: 1.4, 9: 3.6 }; // model.py's HOT
+const STEPS = 8; // summary, 6 spectra, rarefaction
+const analysisStatus = el('analysis-status');
+let currentJob = 0;
+let done = 0;
+let timings = [];
+let spectra = [];
+
+function plot(id, traces, title, xaxis, yaxis) {
+  Plotly.react(id, traces, {
+    ...LAYOUT,
+    title: { text: title, font: { size: 14 } },
+    xaxis: { ...AXIS, ...xaxis },
+    yaxis: { ...AXIS, ...yaxis },
+  }, CONFIG);
+}
+
+const MEASURED = { mode: 'lines+markers', line: { color: '#1f6fb2' } };
+const INDEPENDENT = { mode: 'lines', line: { color: '#888', dash: 'dot' } };
+
+function drawSummary(r) {
+  const q = r.length_quantiles;
+  const sampled = r.sampled_from ? ` Sampled at random from ${r.sampled_from.toLocaleString()} sequences.` : '';
+  el('analysis-summary').textContent = `${r.sequences.toLocaleString()} sequences, ${r.residues.toLocaleString()} residues`
+    + ` (${r.other_residues.toLocaleString()} other letters). Length 5–50–95%: ${q[0]} / ${q[2]} / ${q[4]} aa,`
+    + ` E[L²]/E[L]² ${r.length_dispersion.toFixed(2)}. Σf² ${r.s2.toFixed(4)} (model ${0.0597}),`
+    + ` per protein 5–50–95%: ${r.protein_s2.map((x) => x.toFixed(3)).join(' / ')}.${sampled}`;
+  el('analysis-plots').hidden = false;
+  plot('plot-lengths', [{ x: r.length_x, y: r.length_y, type: 'bar', marker: { color: '#1f6fb2' } }],
+    'Lengths', { title: { text: 'Length, aa' }, type: 'log' }, { title: { text: 'Sequences' } });
+  const amino = [...r.amino];
+  plot('plot-composition', [
+    { x: amino, y: r.composition, name: 'This set', type: 'bar', marker: { color: '#1f6fb2' } },
+    { x: amino, y: r.background, name: 'Model background', mode: 'markers', marker: { color: '#c0392b' } },
+  ], 'Composition', {}, { title: { text: 'Share of residues' } });
+}
+
+function drawSpectra() {
+  const rows = spectra.slice().sort((a, b) => a.k - b.k);
+  const ks = rows.map((r) => r.k);
+  const table = /** @type {HTMLTableElement} */ (/** @type {unknown} */ (el('spectrum-table')));
+  table.hidden = false;
+  table.textContent = '';
+  const add = (cells, tag) => {
+    const row = table.insertRow();
+    for (const c of cells) { const cell = document.createElement(tag); cell.textContent = c; row.append(cell); }
+  };
+  add(['k', 'Windows', 'Distinct', 'Distinct / windows', 'Independent', 'Top 1% postings', 'Decoys ÷ composition', 'Top 1% of hits', 'kfp correction', 'Between halves ÷ composition'], 'th');
+  for (const r of rows) {
+    add([r.k, r.windows.toLocaleString(), r.distinct.toLocaleString(), r.distinct_share.toFixed(3), r.distinct_independent.toFixed(3), r.top1_postings.toFixed(2),
+      r.decoy_ratio.toFixed(2), r.decoy_top1.toFixed(2), KFP_CORRECTION[r.k] ?? '–', r.between_ratio >= 100 ? r.between_ratio.toFixed(0) : r.between_ratio.toFixed(2)], 'td');
+  }
+  plot('plot-distinct', [
+    { x: ks, y: rows.map((r) => r.distinct_share), name: 'This set', ...MEASURED },
+    { x: ks, y: rows.map((r) => r.distinct_independent), name: 'Independent', ...INDEPENDENT },
+  ], 'Distinct k-mers / windows', { title: { text: 'k' }, dtick: 1 }, { title: { text: 'Share' }, range: [0, 1] });
+  plot('plot-collisions', [
+    { x: ks, y: rows.map((r) => r.decoy_ratio), name: 'Decoys', ...MEASURED },
+    { x: ks, y: rows.map((r) => r.between_ratio), name: 'Between halves', mode: 'lines+markers', line: { color: '#c0392b' } },
+    { x: ks.filter((k) => KFP_CORRECTION[k]), y: ks.filter((k) => KFP_CORRECTION[k]).map((k) => KFP_CORRECTION[k]), name: 'kfp correction', mode: 'markers', marker: { color: '#2e8b57', size: 9 } },
+    { x: ks, y: ks.map(() => 1), name: 'Composition', ...INDEPENDENT },
+  ], 'Matches ÷ composition', { title: { text: 'k' }, dtick: 1 }, { title: { text: 'Ratio' }, type: 'log' });
+}
+
+function drawRarefaction(r) {
+  const n = r.rows.map((x) => x.sequences);
+  const axis = { title: { text: 'Sequences' }, type: 'log' };
+  plot('plot-rarefy', [
+    { x: n, y: r.rows.map((x) => x.distinct), name: 'This set', ...MEASURED },
+    { x: n, y: r.rows.map((x) => x.distinct_independent), name: 'Independent', ...INDEPENDENT },
+  ], `Distinct ${r.k}-mers by sequences`, axis, { title: { text: 'Distinct k-mers' }, type: 'log' });
+  plot('plot-decoys', [
+    { x: r.rows.map((x) => x.decoy_windows), y: r.rows.map((x) => x.decoy_hit), name: 'This set', ...MEASURED },
+    { x: r.rows.map((x) => x.decoy_windows), y: r.rows.map((x) => x.decoy_hit_independent), name: 'Independent', ...INDEPENDENT },
+  ], `Decoy hits per window, k ${r.k}`, { title: { text: 'Windows in the index' }, type: 'log' }, { title: { text: 'Share of decoy windows hit' }, type: 'log' });
+}
+
+function onAnalysis(data) {
+  if (data.job !== currentJob) return;
+  if (data.error) {
+    analysisStatus.textContent = `Error: ${data.error}`;
+  } else if (data.reading) {
+    analysisStatus.textContent = 'Reading…';
+  } else {
+    done += 1;
+    timings.push(`${data.step === 'spectrum' ? `k ${data.result.k}` : data.step} ${(data.ms / 1000).toFixed(1)} s`);
+    if (data.step === 'summary') drawSummary(data.result);
+    if (data.step === 'spectrum') { spectra.push(data.result); drawSpectra(); }
+    if (data.step === 'rarefy') drawRarefaction(data.result);
+    analysisStatus.textContent = `${done === STEPS ? 'Done' : `Step ${done} of ${STEPS}`}: ${timings.join(', ')}`;
+  }
+}
+
+el('sample').addEventListener('change', () => { el('file-label').hidden = el('sample').value !== 'file'; });
+
+el('analysis-controls').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const k = +el('rarefy-k').value;
+  if (!Number.isInteger(k) || k < 1 || k > 13) { analysisStatus.textContent = 'Rarefaction k must be a whole number from 1 to 13.'; return; }
+  const file = el('file').files?.[0];
+  if (el('sample').value === 'file' && !file) { analysisStatus.textContent = 'Choose a FASTA file first.'; return; }
+  currentJob += 1;
+  done = 0;
+  timings = [];
+  spectra = [];
+  analysisStatus.textContent = 'Waiting for Pyodide…';
+  worker.postMessage({ analyse: { k, source: el('sample').value === 'file' ? { file } : { url: el('sample').value } } });
+});
