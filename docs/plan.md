@@ -19,7 +19,7 @@ tables in kfp's `docs/tree-index-plan.md`.
 | Chance anchors per read pair | Composition alone is 1.2–1.5× under at k 6–8 and 3.5–3.8× under at k 9 | Yes, with a measured correction |
 | Index size | Representative residues / m is within ~20% of the kfp table | Yes |
 | Noise floor tail (chance against score bar) | Independent hits fall ~1,000× per 10 bits. Decoys fall 10–12× | **No: fit it to decoys** |
-| Precision among homologues | Modelled below, not yet tested | **Unknown, the largest risk** |
+| Precision among homologues | Predicted precision is 2–6× too high against the simulation grid, and hits on relatives are not independent of the true hit | **No: use measured values from the grid** |
 | Analysing a small set in the browser | 44 k proteins: k-mers and spectrum in under 1 s | Yes, up to about 20 M residues |
 | Extrapolating a small set to MGnify | 7× to 2,700× too low | **No: needs a measured scale profile** |
 
@@ -317,7 +317,7 @@ Phases 1–3 are the plan. The rest is a backlog, reordered as questions come up
 - Readouts: index size at a chosen database size, and chance anchors per read.
 - *Done when:* the check's tolerances hold, and slider moves redraw with no visible lag in a browser.
 
-Phases 1 and 2 are built. Nothing below them has started.
+Phases 1–3 are built. Nothing below them has started.
 
 **Phase 2: analyse a small set in the browser.**
 
@@ -338,7 +338,9 @@ Phases 1 and 2 are built. Nothing below them has started.
 
 **Phase 4: score, noise floor and precision.** Hit-count distribution, per-key bits, decoy tail
 tables, an information bit floor slider, a number of reads control with depth per target,
-precision per read and per target, the PR curve and AUPRC under one scenario.
+precision per read and per target, the PR curve and AUPRC under one scenario. Phase 3 showed the
+model cannot predict hits on relatives, so the grid must add hits per read by score and relative
+identity, and precision is read from it at grid values, not predicted between them.
 
 **Phase 5: index selection, scenarios and scale.** A selector for the index, with each index
 supplying its target lengths, group sizes and homologue spectrum (mini-slice and MGnify at first, a
@@ -385,6 +387,43 @@ by the user.
     self matches explain little, and k 8–9 stay far above kfp's correction in a set this small.
   - Not included: a sampled index and simulated reads, listed under "Analysing a small set in the
     browser". Simulated reads need realistic divergence to say anything, so they stay with phase 3.
+
+- **2026-11-04: phase 3.** `measure/sim_grid.py` (run from kfp's checkout, for its aligner) builds an
+  index of 38,270 MGnify90 representatives from the mini-slice, with 22,500 read pairs (2 × 50 aa) from
+  2,250 proteins, 250 per identity bin, at k 5–11 and m 1–128. It takes about 2 minutes on two
+  threads with a 1.4 GB peak. Points appear on the page's recall plots. `checks/test_grid.py` passes.
+  - **Against kfp, at k 9:**
+
+    | | Simulation | kfp |
+    | --- | --- | --- |
+    | Groups per pair at identity ≥ 0.5 vs verified, m 8 | 16.0 | 16.1 |
+    | Chance anchors per pair, 3 frames, m 8 | 0.013 | 0.014 |
+    | Pair recall at 0.9, m 8 | 0.99 | 0.97 |
+    | Pair recall at 0.9, m 16 | 0.94 | 0.88 |
+
+    Recall also runs above kfp's table at lower identity and greater sparsity, by up to 0.15 (k 9, m
+    16, identity 0.8: 0.80 against 0.65). Dense settings agree once kfp's 0.96 ceiling is applied. The
+    simulation has no verification step and measures identity to the representative itself, not to a
+    member of a larger group, which are likely causes, but neither has been tested. So the "done when" condition holds for
+    chance and group counts, and only partly for recall.
+  - **Recall model, not refitted:** RMSE 0.057 over the whole grid with the ceiling removed, against
+    0.128 for independent mutations. Bias is within 0.005 at identity ≥ 0.8, but the model is too
+    low by 0.096 near 0.55 and 0.07 near 0.65.
+  - **Chance:** decoys over composition at m 8 are 1.42, 1.77, 2.02 and 4.00 at k 6–9, against
+    corrections of 1.3, 1.5, 1.4 and 3.6, so an independent sample supports them. They rise with
+    sparsity and k. At k 9, m 8, decoy hits are about 0.01% as common as other-group hits on this set, so homology
+    dominates at this k.
+  - **Independence fails.** At relatives of identity ≥ 0.5, a read hits a relative at 0.60 if its
+    true group is anchored and 0.14 if not (k 9, m 8), and 0.44 against 0.06 at m 32. Reads in
+    conserved regions hit everything, and reads elsewhere hit little. Pooled precision is a ratio of
+    expected counts, so this does not bias it, but it does matter for how many reads are ambiguous.
+  - **Precision fails.** Hit rates on low-identity relatives are far above the model's (0.16
+    against 0.013 at relative identity 0.4–0.5, k 9, m 8, when the true group is anchored), since a
+    whole-protein identity hides shared conserved domains. And 53–84% of other-group hits fall on
+    groups outside each query's 50 aligned candidates, or below 0.3 cover. Without any filter,
+    simulated precision is 0.01–0.05 per pair and the model's 0.03–0.12. So phase 4 reads precision
+    from the grid, as this plan's fallback says.
+  - The mini-slice is denser than the release, so none of these precision values transfer to it.
 
 ## Licence
 

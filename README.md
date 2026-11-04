@@ -15,6 +15,7 @@ python3 -m http.server 8765 --bind 127.0.0.1 -d web  # then open http://127.0.0.
 ```bash
 uv run --no-project --with numpy python checks/test_model.py  # model against Monte Carlo and kfp's tables
 uv run --no-project --with numpy python checks/test_analyse.py  # analysis against the pilot and random sequences
+uv run --no-project --with numpy python checks/test_grid.py  # simulation grid against the model and kfp
 ```
 
 Licence: GPL-3.0-or-later.

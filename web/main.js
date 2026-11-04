@@ -31,6 +31,26 @@ const AXIS = { zeroline: false, automargin: true };
 const LAYOUT = { margin: { t: 36, r: 12, b: 48, l: 56 }, legend: { orientation: 'h', y: -0.3 } };
 const CONFIG = { responsive: true, displaylogo: false };
 
+// Simulated points (measure/sim_grid.py): read pairs of real relatives, at the grid's settings.
+let grid = null;
+const SIMULATED = { name: 'Simulated (mini-slice)', mode: 'markers', marker: { color: '#e08e0b', size: 9, symbol: 'diamond' } };
+
+function gridForIdentity(p) {
+  if (!grid || !p.paired || p.length !== grid.mate) return [];
+  const row = grid.rows.find((x) => x.k === p.k && x.m === p.m);
+  if (!row) return [];
+  const on = row.pairs.map((n, i) => (n > 0 ? i : -1)).filter((i) => i >= 0);
+  return [{ ...SIMULATED, x: on.map((i) => grid.mean_identity[i]), y: on.map((i) => row.recall[i]) }];
+}
+
+function gridForSparsity(p) {
+  if (!grid || !p.paired || p.length !== grid.mate) return [];
+  const b = grid.identity_bins.findIndex((low, i) => p.identity >= low && p.identity < grid.identity_bins[i + 1]);
+  const rows = grid.rows.filter((x) => x.k === p.k);
+  if (b < 0 || !rows.length || !rows[0].pairs[b]) return [];
+  return [{ ...SIMULATED, name: `Simulated (${grid.identity_bins[b]}+)`, x: rows.map((x) => x.m), y: rows.map((x) => x.recall[b]) }];
+}
+
 function draw(r, p) {
   el('recall').textContent = r.recall.toFixed(3);
   el('index').textContent = size(r.index_gb);
@@ -41,6 +61,7 @@ function draw(r, p) {
     { x: r.identity, y: r.by_identity, name: 'Conserved blocks (fitted)', mode: 'lines', line: { color: '#1f6fb2' } },
     { x: r.identity, y: r.by_identity_independent, name: 'Independent mutations', mode: 'lines', line: { color: '#888', dash: 'dot' } },
     { x: [p.identity], y: [r.recall], name: 'Selected', mode: 'markers', marker: { color: '#c0392b', size: 10 } },
+    ...gridForIdentity(p),
   ], {
     ...LAYOUT,
     uirevision: 1,
@@ -58,7 +79,7 @@ function draw(r, p) {
     line: { width: k === p.k ? 3.5 : 1.25 },
   })).concat([{
     x: [p.m], y: [r.recall], name: 'Selected', mode: 'markers', marker: { color: '#c0392b', size: 10 }, showlegend: false,
-  }]), {
+  }, ...gridForSparsity(p)]), {
     ...LAYOUT,
     uirevision: 1,
     title: { text: `Recall by sparsity (identity ${p.identity.toFixed(2)}, ${p.length} aa)`, font: { size: 14 } },
@@ -101,6 +122,16 @@ function update() {
 
 el('controls').addEventListener('input', update);
 update();
+
+fetch('data/sim-grid.json').then((r) => (r.ok ? r.json() : null)).then((g) => {
+  grid = g;
+  if (!g) return;
+  el('grid-note').textContent = `Simulated points: ${g.pairs.toLocaleString()} read pairs from ${g.queries.toLocaleString()} proteins against `
+    + `${g.groups.toLocaleString()} groups, without verification; shown for paired reads of ${g.mate} aa, `
+    + `k ${[...new Set(g.rows.map((x) => x.k))].join(', ')}, 1 in 1–${Math.max(...g.rows.map((x) => x.m))}. `
+    + 'The model keeps kfp\'s recall ceiling of 0.96, which comes from representatives of larger groups.';
+  update();
+}).catch(() => {});
 
 // Analysis of a protein set
 const KFP_CORRECTION = { 5: 1.2, 6: 1.3, 7: 1.5, 8: 1.4, 9: 3.6 }; // model.py's HOT
