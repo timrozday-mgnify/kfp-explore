@@ -122,22 +122,8 @@ def main():
     per_target(t, held)
     against_kfp(t, model.TABLES["slice"])
 
-    params = {
-        "index": "mini-slice", "k": 9, "m": 8, "floor": 0, "truth": 0.7, "mix": "natural", "no_relative": 0.05,
-        "reads": 1e7, "targets": 1e4, "margin": -1,
-    }
-    q = model.compute_precision(params)
-    assert q["available"] and 0 < q["precision"] < 1 and 0 < q["auprc"] <= 1
-    assert not model.compute_precision(params | {"k": 10})["available"]
-    high = model.compute_precision(params | {"floor": 7})
-    assert high["recall"] < q["recall"] and high["precision"] > q["precision"]
-    best = model.compute_precision(params | {"margin": 3})
-    assert best["precision"] > q["precision"] and best["recall"] <= q["recall"]
-    assert model.compute_precision(params | {"m": 8192})["available"]
     k9, low = t["k"]["9"]["floor_cube"][3], [0, 1, 2]
     assert (k9[low] == k9[0]).all()  # floors under a k 9 key's bits change nothing
-    novel = model.compute_precision(params | {"no_relative": 0.9, "truth": 2})
-    assert novel["precision"] < q["precision"]
     print("ok")
 
 

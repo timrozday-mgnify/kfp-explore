@@ -72,7 +72,7 @@
 </div>
 <div id="plots"><div id="plot-identity"></div><div id="plot-m"></div></div>
 <p class="note" id="grid-note"></p>
-<h2>Precision, from shared k-mer tables</h2>
+<h2>Precision and recall per target</h2>
 <form id="precision-form">
   <label>Index
     <select id="index-set">
@@ -104,7 +104,12 @@
     </select>
   </label>
   <label>Reads with no relative <span id="no_relative-out"></span><input type="range" id="no_relative" min="0" max="0.9" step="0.01" value="0.05"></label>
-  <label>Read pairs in the sample <span id="reads-out"></span><input type="range" id="reads" min="3" max="10" step="0.1" value="7"></label>
+  <label>Coverage of each target
+    <select id="coverage">
+      <option value="1">1×</option><option value="2">2×</option><option value="5">5×</option>
+      <option value="10" selected>10×</option><option value="20">20×</option><option value="50">50×</option><option value="100">100×</option>
+    </select>
+  </label>
   <label>Targets present <span id="targets-out"></span><input type="range" id="targets" min="0" max="8" step="0.1" value="4"></label>
 </form>
 <div id="precision-unavailable" class="note" role="status" hidden></div>
@@ -117,22 +122,23 @@
     <div>Other groups per read<b id="p-others">–</b></div>
     <div>Chance groups per read<b id="p-chance">–</b></div>
     <div>Precision per target<b id="p-target-precision">–</b></div>
-    <div>Recall per target<b id="p-target-recall">–</b></div>
+    <div>Recall per target, at this coverage<b id="p-target-recall">–</b></div>
     <div>Depth, read pairs per target<b id="p-depth">–</b></div>
+    <div>Read pairs in the sample<b id="p-reads">–</b></div>
   </div>
-  <div id="precision-plots"><div id="plot-pr"></div><div id="plot-floor-precision"></div><div id="plot-floor-recall"></div></div>
+  <div id="precision-plots"><div id="plot-pr"></div><div id="plot-floor-recall"></div><div id="plot-coverage"></div><div id="plot-target-identity"></div><div id="plot-floor-precision"></div></div>
 </div>
-<p class="note">Measured on the selected index with k from the sliders above, at any sparsity: protein
-reads, pairs of 50 aa, with no translation or errors. Each k-mer a read shares with a group is kept at
+<p class="note" id="precision-note-live"></p>
+<p class="note">Measured on the selected index, at the k, sparsity, read length and alphabet above: computed on demand
+in this browser (a download of about 8 MB once, then each setting once) at k 5–13, for protein and reduced alphabets. Plots across k show the k computed so far at these settings. Reads have
+no translation or errors. Each k-mer a read shares with a group is kept at
 1 in m, simulated over 8 hash salts, so very sparse settings rest on few hits; one index is one draw,
 shown as a range where measured. Scores are kfp's evidence: each key's bits (composition less log2 of the groups holding it)
 less about 9 bits per hit after the first, for every frame's windows. Floors below a key's bits change
 nothing, so low floors only matter at small k or for promiscuous keys. Chance from 2 more frames is
 added. These indexes are one representative per MGnify90 unit and denser than the release, so values
-do not carry over to it. At k 5 and 6, relatives' identities are mostly unknown and count as wrong, so
-"or a relative" reads low. Per-target values take even abundance and were tested only at depth 6, where
-recall per target is up to 0.14 too high at 1 in 32; expect worse at greater depth, as reads of one
-target share k-mers. Chance grows with the index.</p>
+do not carry over to it. Database size and representative share above do not change this panel: it describes the bundled set. At k 5 and 6, and on reduced alphabets, relatives' identities are often unknown and count as wrong, so
+"or a relative" reads low. Recall per target tiles reads across each target, so reads of one target share its conservation and hash; it counts every read over the floor on the true group, under either "A read keeps" rule, and takes even abundance. Precision per target has not been tested above 6 read pairs per target, and probably reads high at great depth, since it does not count other groups reached by reads elsewhere on a target. Chance grows with the index.</p>
 <p class="note">Model: k-mer anchors on group representatives, with conserved and variable blocks
 fitted to kfp's 90%-AAI table (recall ceiling 0.96), and a conservation rate shared by each read
 fitted to the simulation. Index size assumes 225 residues per

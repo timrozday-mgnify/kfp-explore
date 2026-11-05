@@ -307,15 +307,27 @@ def compute_precision(a):
         return recall, precision, wrong + other_ok
 
     recall, precision, others = evaluate(entry)
+    # Recall per target, by floor and coverage: the identity mix over targets that have a relative.
+    coverages = t["coverages"]
+    c = coverages.index(a["coverage"])
+    per_target = np.array(entry["target_called"]) / np.maximum(np.array(t["targets_by_bin"], float), 1)[None, :, None]
+    mix_targets = weights[:-1] / max(weights[:-1].sum(), 1e-12)
+    by_coverage = (per_target[:, :-1] * mix_targets[None, :, None]).sum(1)  # floors by coverages
     # AUPRC by floors, from recall 0 up: each step's precision over its gain in recall.
-    r, q = recall[::-1], precision[::-1]
+    r, q = by_coverage[:, c][::-1], precision[::-1]
     auprc = float((np.diff(np.r_[0, np.maximum.accumulate(r)]) * q).sum() / max(r.max(), 1e-12))
     by_k = {}
     for other_k, e in t["k"].items():
         ri, pi, _ = evaluate(e)
-        by_k[other_k] = {"recall": ri.tolist(), "precision": pi.tolist()}
-    n_reads, targets = a["reads"], a["targets"]
-    depth = n_reads / max(targets, 1)
+        by_k[other_k] = {
+            "recall": ri.tolist(),
+            "precision": pi.tolist(),
+            "target": ((np.array(e["target_called"])[f, :-1] / np.maximum(np.array(t["targets_by_bin"][:-1], float), 1)[:, None])
+                       * mix_targets[:, None]).sum(0).tolist(),
+        }
+    targets = a["targets"]
+    depth = a["coverage"] * t["mean_length"] / (t["mates"] * t["mate"])  # read pairs per target
+    n_reads = depth * targets
     called, called_ok, called_wrong = target_rates(entry, t, level, f, truth, weights, depth)
     per_read_chance = float(entry["floor_decoys"][level, f]) * FRAMES
     from_reads = min(n_reads, CHANCE_FROM_READS)
@@ -339,7 +351,13 @@ def compute_precision(a):
         "curve_precision": precision.tolist(),
         "by_k": by_k,
         "depth": depth,
-        "target_recall": called / max(1 - a["no_relative"], 1e-12),
+        "target_recall": float(by_coverage[f, c]),
+        "coverages": coverages,
+        "coverage": a["coverage"],
+        "target_by_floor": by_coverage.T.tolist(),  # coverages by floors
+        "target_by_identity": per_target[f, :-1].T.tolist(),  # coverages by identity bins
+        "identity_bins": t["identity_bins"][:-1],
+        "reads": n_reads,
         "target_precision": called_correct / max(called_correct + called_wrong + chance_groups, 1e-12),
     }
 
@@ -357,9 +375,6 @@ def compute(params_json):
     nearby = sorted({j for j in range(k - 4, k + 5, 2) if 1 <= j <= MAX_K.get(alphabet, 31)})
     model = {"paired": paired, "within": within}
     return json.dumps({
-        "precision": (
-            compute_precision(a) if alphabet == "protein" and a.get("index") in TABLES else {"available": False}
-        ),
         "identity": ps.tolist(),
         "by_identity": recall(length, k, m, ps, **model).tolist(),
         "by_identity_independent": recall(length, k, m, ps, paired, INDEPENDENT, 1.0, None, within).tolist(),

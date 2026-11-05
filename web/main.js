@@ -1,6 +1,6 @@
 // @ts-check
 /* global Plotly */
-const IDS = ['alphabet', 'k', 'm', 'length', 'identity', 'proteins', 'rep_share', 'index-set', 'floor', 'margin', 'truth', 'mix', 'no_relative', 'reads', 'targets', 'b-level', 'b-at', 'pol-family', 'pol-rule', 'pol-truth']; // alphabet first: it sets k's range
+const IDS = ['alphabet', 'k', 'm', 'length', 'identity', 'proteins', 'rep_share', 'index-set', 'floor', 'margin', 'truth', 'mix', 'no_relative', 'coverage', 'targets', 'b-level', 'b-at', 'pol-family', 'pol-rule', 'pol-truth']; // alphabet first: it sets k's range
 const el = (id) => /** @type {HTMLInputElement} */ (document.getElementById(id));
 
 const compact = (x) => (x >= 1e4 || (x > 0 && x < 0.01) ? x.toExponential(1).replace('e+', 'e') : x >= 100 ? x.toFixed(0) : x.toPrecision(2));
@@ -22,7 +22,7 @@ function params() {
     truth: +el('truth').value,
     mix: el('mix').value,
     no_relative: +el('no_relative').value,
-    reads: 10 ** +el('reads').value,
+    coverage: +el('coverage').value,
     targets: Math.round(10 ** +el('targets').value),
   };
 }
@@ -37,7 +37,6 @@ function showInputs(p) {
   const floor = FLOORS[p.floor];
   el('floor-out').textContent = floor === 0 ? 'none' : `${floor} bits`;
   el('no_relative-out').textContent = p.no_relative.toFixed(2);
-  el('reads-out').textContent = p.reads.toExponential(1).replace('e+', 'e');
   el('targets-out').textContent = p.targets.toExponential(1).replace('e+', 'e');
 }
 
@@ -71,16 +70,51 @@ function gridForSparsity(p) {
 const FLOORS = [0, 5, 10, 20, 30, 40, 60, 80, 120, 160, 200]; // measure/precision_tables.py
 const NO_FLOOR_X = 2.5; // where 'no floor' sits on the log axis
 
-function drawPrecision(q, p) {
+// Settings the bundled tables do not cover are computed on demand (live.js).
+const LIVE_K = [5, 13];
+let liveWorker = null;
+let liveId = 0;
+
+function liveProblem(p) {
+  if (p.alphabet === 'dna') return 'Precision needs nucleotide relatives, which the bundled sets do not have.';
+  if (p.k < LIVE_K[0] || p.k > LIVE_K[1]) return `Precision is computed on demand for k ${LIVE_K[0]}–${LIVE_K[1]} only.`;
+  if (p.k > p.length) return 'k is longer than the reads.';
+  return null;
+}
+
+function askLive(p) {
+  if (!liveWorker) {
+    liveWorker = new Worker('live.js');
+    liveWorker.onmessage = ({ data }) => {
+      if (data.id !== liveId) return;
+      const off = el('precision-unavailable');
+      if (data.progress) {
+        off.hidden = false;
+        off.textContent = `${data.progress}. This takes up to about 30 s the first time; later it is kept in this browser.`;
+        el('precision-results').style.opacity = 0.35;
+      }
+      if (data.error) { off.hidden = false; off.textContent = `Could not compute precision: ${data.error}`; }
+      if (data.computed_s !== undefined) el('precision-note-live').textContent = `Computed in this browser in ${data.computed_s.toFixed(1)} s.`;
+      if (data.result) drawPrecision(data.result, latest, true);
+    };
+  }
+  liveId += 1;
+  liveWorker.postMessage({ ...p, id: liveId });
+}
+
+function drawPrecision(q, p, fromLive = false) {
   const off = el('precision-unavailable');
-  off.hidden = q.available;
-  el('precision-results').hidden = !q.available;
   if (!q.available) {
-    off.textContent = p.alphabet !== 'protein'
-      ? 'Tables are measured for the protein alphabet only so far.'
-      : `No table at k ${p.k}. Tables exist at k ${(q.ks ?? []).join(', ')}.`;
+    const problem = liveProblem(p);
+    el('precision-results').hidden = Boolean(problem);
+    off.hidden = !problem;
+    if (problem) { off.textContent = problem; el('precision-note-live').textContent = ''; } else askLive(p);
     return;
   }
+  off.hidden = true;
+  el('precision-results').hidden = false;
+  el('precision-results').style.opacity = 1;
+  if (!fromLive) el('precision-note-live').textContent = '';
   const value = (x, digits = 3) => (x === null ? '–' : x.toFixed(digits));
   const spread = q.hash_sd === null || q.precision === null ? '' : ` ± ${(q.precision * q.hash_sd).toFixed(3)}`;
   el('p-precision').textContent = `${value(q.precision)}${spread}`;
@@ -92,16 +126,19 @@ function drawPrecision(q, p) {
   el('p-target-precision').textContent = value(q.target_precision);
   el('p-target-recall').textContent = value(q.target_recall);
   el('p-depth').textContent = compact(q.depth);
+  el('p-reads').textContent = compact(q.reads);
   const label = (x) => (x === 0 ? 'no floor' : `${x} bits`);
-  const traces = [{
-    x: q.curve_recall, y: q.curve_precision, text: q.floors.map(label), name: 'By floor', mode: 'lines+markers', line: { color: '#1f6fb2' },
-    hovertemplate: 'recall %{x:.3f}, precision %{y:.3f}, %{text}<extra></extra>',
-  }, { x: [q.recall], y: [q.precision], name: 'This floor', mode: 'markers', marker: { color: '#c0392b', size: 11 } }];
+  const width = (c) => (c === q.coverage ? 3.5 : 1.25);
+  const traces = q.coverages.map((c, i) => ({
+    x: q.target_by_floor[i], y: q.curve_precision, text: q.floors.map(label), name: `${c}×`, mode: 'lines+markers', marker: { size: 4 }, line: { width: width(c) },
+    hovertemplate: `${c}×, %{text}: recall per target %{x:.3f}, precision %{y:.3f}<extra></extra>`,
+  }));
+  traces.push({ x: [q.target_recall], y: [q.precision], name: 'This setting', mode: 'markers', marker: { color: '#c0392b', size: 11 } });
   Plotly.react('plot-pr', traces, {
     ...LAYOUT,
     uirevision: 1,
     title: { text: `Precision and recall (${p.index}, k ${p.k}, 1 in ${p.m})`, font: { size: 14 } },
-    xaxis: { ...AXIS, title: { text: 'Recall per read' }, range: [0, 1] },
+    xaxis: { ...AXIS, title: { text: 'Recall per target' }, range: [0, 1] },
     yaxis: { ...AXIS, title: { text: 'Precision per read' }, range: [0, 1] },
   }, CONFIG);
   const floorX = q.floors.map((x) => (x === 0 ? NO_FLOOR_X : x));
@@ -110,22 +147,36 @@ function drawPrecision(q, p) {
     tickvals: [NO_FLOOR_X, 5, 10, 20, 40, 80, 160], ticktext: ['none', '5', '10', '20', '40', '80', '160'],
   };
   const ks = Object.keys(q.by_k).map(Number).sort((a, b) => a - b);
-  for (const [id, key, title] of [['plot-floor-precision', 'precision', 'Precision by floor'], ['plot-floor-recall', 'recall', 'Recall by floor']]) {
-    Plotly.react(id, ks.map((k) => ({
-      x: floorX, y: q.by_k[k][key], name: `k ${k}`, mode: 'lines+markers', marker: { size: 4 }, line: { width: k === p.k ? 3.5 : 1.25 },
-      text: q.floors.map(label), hovertemplate: `k ${k}, %{text}: %{y:.3f}<extra></extra>`,
-    })), {
-      ...LAYOUT,
-      uirevision: 1,
-      title: { text: `${title} (1 in ${p.m})`, font: { size: 14 } },
-      xaxis: axis,
-      yaxis: { ...AXIS, title: { text: title.split(' ')[0] }, range: [0, 1] },
-    }, CONFIG);
-  }
+  Plotly.react('plot-floor-precision', ks.map((k) => ({
+    x: floorX, y: q.by_k[k].precision, name: `k ${k}`, mode: 'lines+markers', marker: { size: 4 }, line: { width: k === p.k ? 3.5 : 1.25 },
+    text: q.floors.map(label), hovertemplate: `k ${k}, %{text}: %{y:.3f}<extra></extra>`,
+  })), {
+    ...LAYOUT, uirevision: 1, title: { text: `Precision per read by floor (1 in ${p.m})`, font: { size: 14 } }, xaxis: axis, yaxis: { ...AXIS, title: { text: 'Precision per read' }, range: [0, 1] },
+  }, CONFIG);
+  Plotly.react('plot-floor-recall', q.coverages.map((c, i) => ({
+    x: floorX, y: q.target_by_floor[i], name: `${c}×`, mode: 'lines+markers', marker: { size: 4 }, line: { width: width(c) },
+    text: q.floors.map(label), hovertemplate: `${c}×, %{text}: %{y:.3f}<extra></extra>`,
+  })), {
+    ...LAYOUT, uirevision: 1, title: { text: `Recall per target by floor (k ${p.k}, 1 in ${p.m})`, font: { size: 14 } }, xaxis: axis, yaxis: { ...AXIS, title: { text: 'Recall per target' }, range: [0, 1] },
+  }, CONFIG);
+  Plotly.react('plot-coverage', ks.map((k) => ({
+    x: q.coverages, y: q.by_k[k].target, name: `k ${k}`, mode: 'lines+markers', marker: { size: 5 }, line: { width: k === p.k ? 3.5 : 1.25 },
+    hovertemplate: `k ${k}, %{x}×: %{y:.3f}<extra></extra>`,
+  })), {
+    ...LAYOUT, uirevision: 1, title: { text: `Recall per target by coverage (${label(q.floor)}, 1 in ${p.m})`, font: { size: 14 } },
+    xaxis: { ...AXIS, type: 'log', title: { text: 'Coverage of the target' }, tickmode: 'array', tickvals: q.coverages, ticktext: q.coverages.map((c) => `${c}×`) },
+    yaxis: { ...AXIS, title: { text: 'Recall per target' }, range: [0, 1] },
+  }, CONFIG);
+  Plotly.react('plot-target-identity', q.coverages.map((c, i) => ({
+    x: q.identity_bins, y: q.target_by_identity[i], name: `${c}×`, mode: 'lines+markers', marker: { size: 4 }, line: { width: width(c) },
+    hovertemplate: `${c}×, identity from %{x}: %{y:.3f}<extra></extra>`,
+  })), {
+    ...LAYOUT, uirevision: 1, title: { text: `Recall per target by identity (${label(q.floor)})`, font: { size: 14 } },
+    xaxis: { ...AXIS, title: { text: 'Identity to the nearest relative, lower edge' } }, yaxis: { ...AXIS, title: { text: 'Recall per target' }, range: [0, 1] },
+  }, CONFIG);
 }
 
 function draw(r, p) {
-  drawPrecision(r.precision, p);
   el('recall').textContent = r.recall.toFixed(3);
   el('index').textContent = size(r.index_gb);
   el('postings').textContent = r.postings.toExponential(1).replace('e+', 'e');
@@ -197,6 +248,8 @@ function update() {
   q.set('paired', el('paired').checked ? '1' : '0');
   history.replaceState(null, '', `?${q}`);
   worker.postMessage(latest);
+  const problem = liveProblem(latest);
+  if (problem) drawPrecision({ available: false }, latest); else askLive(latest);
 }
 
 el('controls').addEventListener('input', update);
