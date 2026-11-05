@@ -1,8 +1,8 @@
 // Precision on demand, in its own Pyodide so the sliders stay usable. Results are kept in IndexedDB,
 // so each setting is computed once per browser. Only the latest request is run next.
 const PYODIDE = 'https://cdn.jsdelivr.net/pyodide/v0.27.7/full/';
-const VERSION = 2; // raise when live.py or an export changes what a result means
-const KS = [5, 6, 7, 8, 9, 10, 11, 12, 13];
+const VERSION = 3; // raise when live.py or an export changes what a result means
+const KS = Array.from({ length: 31 }, (_, i) => i + 1);
 importScripts(`${PYODIDE}pyodide.js`);
 
 let py = null;

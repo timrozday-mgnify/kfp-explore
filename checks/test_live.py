@@ -110,6 +110,16 @@ rmse = float(np.sqrt(np.mean(np.square(errors))))
 print(f"recall per target against simulation: RMSE {rmse:.3f} over bins")
 assert rmse < 0.1
 
+# Long k-mers (hashed above k 14) and short ones (capped read pairs).
+by_k = {k: panel(k=k, m=1, floor=0) for k in (31, 20, 15, 14, 4, 3, 2, 1)}
+for k, q in by_k.items():
+    print(f"k{k}: recall per target {q['target_recall']:.3f}, per read {q['recall']:.3f}, precision {q['precision']:.4f}, "
+          f"{q['measured_pairs']} read pairs measured")
+assert by_k[31]["target_recall"] < by_k[20]["target_recall"] < by_k[14]["target_recall"]
+assert abs(by_k[15]["target_recall"] - by_k[14]["target_recall"]) < 0.03
+assert by_k[4]["measured_pairs"] < 4500 and by_k[1]["recall"] > 0.8  # any hit counts with no floor
+assert panel(k=5, m=1, floor=0, alphabet="dayhoff")["measured_pairs"] < 4500
+
 # A stored result gives the same panel, without the sequences.
 r = request(k=9, m=16)
 text = live.compute(r)

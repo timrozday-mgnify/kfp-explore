@@ -71,13 +71,12 @@ const FLOORS = [0, 5, 10, 20, 30, 40, 60, 80, 120, 160, 200]; // measure/precisi
 const NO_FLOOR_X = 2.5; // where 'no floor' sits on the log axis
 
 // Settings the bundled tables do not cover are computed on demand (live.js).
-const LIVE_K = [5, 13];
 let liveWorker = null;
 let liveId = 0;
+let liveAnswered = 0;
 
 function liveProblem(p) {
   if (p.alphabet === 'dna') return 'Precision needs nucleotide relatives, which the bundled sets do not have.';
-  if (p.k < LIVE_K[0] || p.k > LIVE_K[1]) return `Precision is computed on demand for k ${LIVE_K[0]}–${LIVE_K[1]} only.`;
   if (p.k > p.length) return 'k is longer than the reads.';
   return null;
 }
@@ -95,11 +94,20 @@ function askLive(p) {
       }
       if (data.error) { off.hidden = false; off.textContent = `Could not compute precision: ${data.error}`; }
       if (data.computed_s !== undefined) el('precision-note-live').textContent = `Computed in this browser in ${data.computed_s.toFixed(1)} s.`;
-      if (data.result) drawPrecision(data.result, latest, true);
+      if (data.result) { liveAnswered = data.id; drawPrecision(data.result, latest, true); }
     };
   }
   liveId += 1;
-  liveWorker.postMessage({ ...p, id: liveId });
+  const id = liveId;
+  liveWorker.postMessage({ ...p, id });
+  setTimeout(() => { // an earlier setting may still be computing, and it cannot be interrupted
+    if (id !== liveId || liveAnswered === id) return;
+    const off = el('precision-unavailable');
+    if (!off.hidden) return;
+    off.hidden = false;
+    off.textContent = 'Computing…';
+    el('precision-results').style.opacity = 0.35;
+  }, 300);
 }
 
 function drawPrecision(q, p, fromLive = false) {
@@ -127,6 +135,7 @@ function drawPrecision(q, p, fromLive = false) {
   el('p-target-recall').textContent = value(q.target_recall);
   el('p-depth').textContent = compact(q.depth);
   el('p-reads').textContent = compact(q.reads);
+  el('p-measured').textContent = q.measured_pairs.toLocaleString();
   const label = (x) => (x === 0 ? 'no floor' : `${x} bits`);
   const width = (c) => (c === q.coverage ? 3.5 : 1.25);
   const traces = q.coverages.map((c, i) => ({

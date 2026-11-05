@@ -20,7 +20,7 @@ PAIRS_PER_QUERY = 3
 MAX_GAP = 40
 TRANSLATED_FRAMES = 6
 LEVELS = 14
-K_RANGE = (5, 13)  # k 4 and below need capped reads; base-21 codes stop at 13
+HIT_LIMIT = 15_000_000  # (read pair, group) k-mer hits: short k-mers are held by most groups, and wasm's memory is limited
 COVERAGES = (1, 2, 5, 10, 20, 50, 100)  # read coverage of a target
 TILE_GAP = 20  # between a tiled pair's mates; a random read's is 0 to MAX_GAP
 
@@ -55,37 +55,44 @@ def build_index(name, alphabet, k):
     memo = (name, alphabet, k)
     if memo not in _index_memo:
         a = encoding(alphabet)[DATA[name]["index"]]
+        # Above k 14 the base-21 code wraps around 64 bits, which is then a hash: level() mixes it,
+        # and among ~10^7 k-mers a collision is very unlikely.
         x, at = analyse.kmers(a, k)
         group = np.cumsum(a == analyse.SEPARATOR)[at]
+        letters = np.bincount(a[a < 21], minlength=21)[:20].astype(float)
+        log_f = np.zeros(256)
+        log_f[:20] = -np.log2(np.maximum(letters / letters.sum(), 1e-12))
+        running = np.r_[0.0, np.cumsum(log_f[a])]
+        q0 = running[at + k] - running[at]  # each k-mer's chance from composition, in bits
         o = np.argsort(x, kind="stable")  # groups rise along the sequence, so (k-mer, group) order
         x, group = x[o], group[o]
         keep = np.r_[True, (x[1:] != x[:-1]) | (group[1:] != group[:-1])]
         x, group = x[keep], group[keep].astype(np.int32)
         first = np.flatnonzero(np.r_[True, x[1:] != x[:-1]])
         keys, counts = x[first], np.diff(np.r_[first, len(x)])
-        letters = np.bincount(a[a < 21], minlength=21)[:20].astype(float)
-        log_f = np.log2(np.maximum(letters / letters.sum(), 1e-12))
-        bits = np.zeros(len(keys))
-        rest = keys.copy()
-        for _ in range(k):
-            bits -= log_f[rest % 21]
-            rest //= 21
-        bits = np.maximum(bits - np.log2(counts), 0)
+        bits = np.maximum(q0[o][keep][first] - np.log2(counts), 0)
         _index_memo.clear()  # one index at a time: wasm's memory is limited
         _index_memo[memo] = (keys, first, counts, group, bits)
     return _index_memo[memo]
 
 
-def read_set(name, length, paired):
-    """Each kept query's reads, and their reversed decoys. The same reads for every k and m."""
+def read_set(name, length, paired, max_pairs=None):
+    """Each kept query's reads, and their reversed decoys. The same reads for every k and m, unless
+    ``max_pairs`` caps them: then evenly across identity bins, and one pair per query if very few."""
     d = DATA[name]
     rng = np.random.default_rng(1)
     pair_q, reads, decoys = [], [], []
     need = 2 * length if paired else length
-    for q, s in enumerate(d["query_list"]):
-        if len(s) < need:
-            continue
-        for _ in range(PAIRS_PER_QUERY):
+    kept = [q for q, s in enumerate(d["query_list"]) if len(s) >= need]
+    each = PAIRS_PER_QUERY
+    if max_pairs is not None and max_pairs < len(kept) * PAIRS_PER_QUERY:
+        each = PAIRS_PER_QUERY if max_pairs >= 3 * PAIRS_PER_QUERY * len(BINS) else 1
+        per_bin = max(int(np.ceil(max_pairs / (each * len(BINS)))), 1)
+        order = rng.permutation(kept)
+        kept = sorted(q for b in range(len(BINS)) for q in order[d["bin"][order] == b][:per_bin].tolist())
+    for q in kept:
+        s = d["query_list"][q]
+        for _ in range(each):
             pair_q.append(q)
             if paired:
                 gap = int(rng.integers(0, min(MAX_GAP, len(s) - need) + 1))
@@ -96,7 +103,18 @@ def read_set(name, length, paired):
                 got = [s[start : start + length]]
             reads += got
             decoys += [m[::-1] for m in got]
-    return np.array(pair_q, np.int32), reads, decoys
+    return np.array(pair_q, np.int32), reads, decoys, each
+
+
+def hits_per_pair(reads, per_owner, table, idx, k):
+    """Mean k-mer hits per read pair, from a sample of them."""
+    keys, _, counts, _, _ = idx
+    sample = reads[:: max(len(reads) // (60 * per_owner), 1) * per_owner][:60]
+    encoded = table[np.frombuffer(b"*".join(sample), np.uint8)]
+    x, _ = analyse.kmers(encoded, k)
+    pos = np.searchsorted(keys, x)
+    pos[pos == len(keys)] = 0
+    return max(float(counts[pos][keys[pos] == x].sum(dtype=np.float64)) * per_owner / max(len(sample), 1), 1.0)
 
 
 def expand(seqs, per_owner, table, idx, scale):
@@ -128,10 +146,13 @@ def rows_for(name, alphabet, k, length, paired):
     if memo not in _rows_memo:
         d = DATA[name]
         idx = build_index(name, alphabet, k)
-        pair_q, reads, decoys = read_set(name, length, paired)
-        scale = int(d["groups"]) + 2
         table = encoding(alphabet)
         per_owner = 2 if paired else 1
+        pair_q, reads, decoys, each = read_set(name, length, paired)
+        cap = int(HIT_LIMIT / hits_per_pair(reads, per_owner, table, idx, k))
+        if cap < len(pair_q):
+            pair_q, reads, decoys, each = read_set(name, length, paired, cap)
+        scale = int(d["groups"]) + 2
         _rows_k[0] = k
         pair, group, inverse, key_of = expand(reads, per_owner, table, idx, scale)
         d_pair, _, d_inverse, d_key = expand(decoys, per_owner, table, idx, scale)
@@ -149,7 +170,7 @@ def rows_for(name, alphabet, k, length, paired):
         _rows_memo[memo] = {
             "pair": pair.astype(np.int32), "inverse": inverse, "key_of": key_of, "true": true, "cell": cell,
             "d_pair": d_pair, "d_inverse": d_inverse, "d_key": d_key, "pair_q": pair_q, "pair_bin": pair_bin,
-            "keys": idx[0], "bits": idx[4],
+            "keys": idx[0], "bits": idx[4], "each": each,
         }  # fmt: skip
     return _rows_memo[memo]
 
@@ -214,7 +235,8 @@ def target_called(name, alphabet, k, length, paired, at):
         lv = level(keys ^ (salt * 0x51ED27))
         score, _, _ = scored(read, key, bits, lv, at, len(tile_q), charge)
         for f, floor in enumerate(FLOORS):
-            r = np.bincount(tile_q[score >= floor], minlength=n_q) / tiles
+            on = score >= floor if floor else score > -np.inf
+            r = np.bincount(tile_q[on], minlength=n_q) / tiles
             for c, coverage in enumerate(COVERAGES):
                 n = coverage * lengths / (mates * length)
                 called[f, :, c] += np.bincount(bins, weights=1 - np.exp(-n * r), minlength=len(BINS))
@@ -248,7 +270,7 @@ def entry_for(name, alphabet, k, length, paired, at):
     charge = float(np.log2((2 if paired else 1) * TRANSLATED_FRAMES * (length - k + 1)))
     cube = np.zeros((n_floors, n_cells), np.int64)
     best = np.zeros((len(MARGINS), n_floors, n_cells), np.int64)
-    query_pass = np.zeros((n_floors, n_bins, PAIRS_PER_QUERY + 1), np.int64)
+    query_pass = np.zeros((n_floors, n_bins, r["each"] + 1), np.int64)
     decoys = np.zeros(n_floors, np.int64)
     precision = np.zeros((SALTS, n_floors))
     hit_bits = np.zeros(2)
@@ -263,14 +285,14 @@ def entry_for(name, alphabet, k, length, paired, at):
         hit_bits += [summed[true].sum(), hits[true].sum()]
         top = np.repeat(np.maximum.reduceat(score, starts), np.diff(np.r_[starts, n])) if n else score
         for f, floor in enumerate(FLOORS):
-            on = score >= floor
+            on = score >= floor if floor else score > -np.inf  # no floor keeps every hit
             cube[f] += np.bincount(cell[on], minlength=n_cells)
             for g, margin in enumerate(MARGINS):
                 best[g, f] += np.bincount(cell[on & (score >= top - margin)], minlength=n_cells)
             precision[salt - 1, f] = (on & true).sum() / max(on.sum(), 1)
             true_pairs = np.bincount(query_of_pair[pair[on & true]], minlength=len(queries))
             np.add.at(query_pass[f], (bin_of_query, true_pairs), 1)
-            decoys[f] += (d_score >= floor).sum()
+            decoys[f] += (d_score >= floor if floor else d_score > -np.inf).sum()
     bits = r["bits"]
     return {
         "postings": int(_index_memo[(name, alphabet, k)][3].size),
@@ -314,10 +336,10 @@ def compute(request):
     entry = entry_for(name, alphabet, k, length, paired, at)
     r = _rows_memo[(name, alphabet, k, length, paired)]
     meta = {
-        "pairs": len(r["pair_q"]), "pairs_per_query": PAIRS_PER_QUERY, "mate": length, "groups": int(DATA[name]["groups"]),
+        "pairs": len(r["pair_q"]), "pairs_per_query": r["each"], "mate": length, "groups": int(DATA[name]["groups"]),
         "identity_bins": BINS, "x_edges": X_EDGES.tolist(), "floors": list(FLOORS), "salts": SALTS, "n_bands": N_BANDS,
         "margins": list(MARGINS), "pairs_by_bin": np.bincount(r["pair_bin"], minlength=len(BINS)).tolist(),
-        "queries_by_bin": (np.bincount(r["pair_bin"], minlength=len(BINS)) // PAIRS_PER_QUERY).tolist(),
+        "queries_by_bin": (np.bincount(r["pair_bin"], minlength=len(BINS)) // r["each"]).tolist(),
         "coverages": list(COVERAGES), "mates": 2 if paired else 1,
         "mean_length": float(np.mean([len(s) for s in DATA[name]["query_list"]])),
         "targets_by_bin": np.bincount(DATA[name]["bin"], minlength=len(BINS)).tolist(),

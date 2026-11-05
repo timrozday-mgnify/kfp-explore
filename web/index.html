@@ -125,12 +125,13 @@
     <div>Recall per target, at this coverage<b id="p-target-recall">–</b></div>
     <div>Depth, read pairs per target<b id="p-depth">–</b></div>
     <div>Read pairs in the sample<b id="p-reads">–</b></div>
+    <div>Read pairs measured (fewer at short k)<b id="p-measured">–</b></div>
   </div>
   <div id="precision-plots"><div id="plot-pr"></div><div id="plot-floor-recall"></div><div id="plot-coverage"></div><div id="plot-target-identity"></div><div id="plot-floor-precision"></div></div>
 </div>
 <p class="note" id="precision-note-live"></p>
 <p class="note">Measured on the selected index, at the k, sparsity, read length and alphabet above: computed on demand
-in this browser (a download of about 8 MB once, then each setting once) at k 5–13, for protein and reduced alphabets. Plots across k show the k computed so far at these settings. Reads have
+in this browser (a download of about 8 MB once, then each setting once), for protein and reduced alphabets. Where short k-mers are held by most groups, precision is measured on fewer read pairs to stay within the browser's memory, down to a few tens, so treat it as rough there; recall per target always uses every query. Plots across k show the k computed so far at these settings. Reads have
 no translation or errors. Each k-mer a read shares with a group is kept at
 1 in m, simulated over 8 hash salts, so very sparse settings rest on few hits; one index is one draw,
 shown as a range where measured. Scores are kfp's evidence: each key's bits (composition less log2 of the groups holding it)

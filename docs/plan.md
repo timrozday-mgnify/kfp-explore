@@ -317,7 +317,7 @@ Phases 1–3 are the plan. The rest is a backlog, reordered as questions come up
 - Readouts: index size at a chosen database size, and chance anchors per read.
 - *Done when:* the check's tolerances hold, and slider moves redraw with no visible lag in a browser.
 
-Phases 1–3 and 3b are built, phase 3c is partly done, phase 4 is mostly done, phase 6 has tables and a panel, and precision is computed on demand at k 5–13 (below). Phases 5 and 7–9 have not started.
+Phases 1–3 and 3b are built, phase 3c is partly done, phase 4 is mostly done, phase 6 has tables and a panel, and precision is computed on demand at k 1–31 (below). Phases 5 and 7–9 have not started.
 
 **Phase 2: analyse a small set in the browser.**
 
@@ -647,6 +647,13 @@ by the user.
   - **Method (`live.target_called`).** Three random read pairs per query cannot give recall at high coverage: a target with none passing would stay undetectable at any depth. So reads are tiled across each target, every half read length. Within one hash salt, a target's passing share r comes from its tiles, and it is called with probability 1 − exp(−n r), with n = coverage × its own length / (mates × read length). Only hits on the true group are needed, so this is cheap.
   - **Check (`checks/test_live.py`).** Against simulated random reads at the same coverage, salts and floors, on 300 targets and 8 settings from 1× to 100×: RMSE 0.039 over identity bins. Means per setting are within 0.02 except k 9, 1 in 32, 10× at 40 bits (0.566 against 0.599) and k 7, 1 in 64, 50× at 40 bits (0.358 against 0.408). So it runs a little low at sparse settings over a floor, possibly because tiled pairs have one mate gap where real pairs vary.
   - **Limits.** Recall counts every read over the floor on the true group, so "A read keeps" does not change it; a best-group rule per target is not measured. Abundance is even, with no errors or translation. Precision per target still uses read-level hit rates, is untested above 6 read pairs per target, and probably reads high at great depth, since other groups reached from elsewhere on a target are not counted, so the plots pair recall per target with precision per read.
+
+- **2026-11-05: precision at every k on the slider, k 1–31.**
+  - **k above 14 is hashed.** The base-21 code fits 64 bits to k 14, and above that it wraps, which `level()` then mixes. So the code is unchanged to k 14 and a hash beyond it, and key bits now come from a running sum along the sequence, not from decoding the k-mer. Across the join, recall per target is 0.964 at k 14 and 0.959 at k 15 (m 1, no floor); k 20 gives 0.940 and k 31 0.922.
+  - **Short k-mers are capped by hits, not by k.** Read pairs are cut, evenly across identity bins, to stay within 15 M k-mer hits, measured from a sample of reads. This also protects reduced alphabets: dayhoff at k 5 has a k 2–3 protein's few k-mers, and is measured on 40 read pairs. On the mini-slice, protein: k 4 uses 870 read pairs, k 3 uses 80, k 2 and k 1 use 10. The panel shows the count. Recall per target still uses every query, since it only needs the true group.
+  - **"No floor" now means any hit.** It was a score of at least 0, which dropped multi-hit reads on keys with no bits, so recall at k 1–3 read near 0. This changes results only where key bits fall below the charge.
+  - **Times in the browser pane, while the pane was hidden, one run each:** k 1, 9.8 s; k 3, 7.7 s; k 4, 12.7 s; dayhoff k 5, 5.5 s; k 14, 26 s; k 20, 30.5 s. High k is the slowest, and probably sorting mostly distinct k-mers is why, but that has not been profiled. Wasm heap was not re-measured with these changes.
+  - **Limits.** At k 1–3 precision reads 0.000, and with 10–80 read pairs it is noise beyond that: nearly every group is hit. At high k with sparse sampling, few hits survive. Nucleotide mode is still unavailable.
 
 ## Licence
 

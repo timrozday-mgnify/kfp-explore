@@ -358,6 +358,7 @@ def compute_precision(a):
         "target_by_identity": per_target[f, :-1].T.tolist(),  # coverages by identity bins
         "identity_bins": t["identity_bins"][:-1],
         "reads": n_reads,
+        "measured_pairs": t["pairs"],
         "target_precision": called_correct / max(called_correct + called_wrong + chance_groups, 1e-12),
     }
 
