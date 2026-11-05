@@ -18,6 +18,7 @@ uv run --no-project --with numpy python checks/test_analyse.py  # analysis again
 uv run --no-project --with numpy python checks/test_grid.py  # simulation grid against the model and kfp
 uv run --no-project --with numpy python checks/test_tables.py  # precision tables against held-out simulation
 uv run --no-project --with numpy python checks/test_benchmark.py  # kfp benchmark table against kfp's gate
+uv run --no-project --with numpy python checks/test_policy.py  # grouping and key policy against kfp's comparisons
 uv run --no-project --with numpy python measure/fit_rate.py web/data/sim-grid.json web/data/sim-grid-slice.json  # fit the read rate on each set
 ```
 

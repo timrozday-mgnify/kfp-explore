@@ -1,6 +1,6 @@
 // @ts-check
 /* global Plotly */
-const IDS = ['alphabet', 'k', 'm', 'length', 'identity', 'proteins', 'rep_share', 'index-set', 'floor', 'margin', 'truth', 'mix', 'no_relative', 'reads', 'targets', 'b-level', 'b-at']; // alphabet first: it sets k's range
+const IDS = ['alphabet', 'k', 'm', 'length', 'identity', 'proteins', 'rep_share', 'index-set', 'floor', 'margin', 'truth', 'mix', 'no_relative', 'reads', 'targets', 'b-level', 'b-at', 'pol-family', 'pol-rule', 'pol-truth']; // alphabet first: it sets k's range
 const el = (id) => /** @type {HTMLInputElement} */ (document.getElementById(id));
 
 const compact = (x) => (x >= 1e4 || (x > 0 && x < 0.01) ? x.toExponential(1).replace('e+', 'e') : x >= 100 ? x.toFixed(0) : x.toPrecision(2));
@@ -216,6 +216,84 @@ fetch('data/sim-grid.json').then((r) => (r.ok ? r.json() : null)).then((g) => {
     + `k ${[...new Set(g.rows.map((x) => x.k))].join(', ')}, 1 in 1–${Math.max(...g.rows.map((x) => x.m))}. `
     + 'The model keeps kfp\'s recall ceiling of 0.96, which comes from representatives of larger groups. '
     + 'Also simulated, at fewer settings: murphy10, dayhoff and seb8.';
+}).catch(() => {});
+
+// Grouping and key policy, measured on keys built kfp's way
+const FAMILIES = {
+  policy: (c) => c.k === 6 && c.window === 8 && c.radius === 'tree:0.57' && !c.budget,
+  radius: (c) => c.k === 6 && c.window === 8 && !c.budget && (c.policy === 'composite:0.25' || c.radius === 'none'),
+  window: (c) => c.k === 6 && c.radius === 'tree:0.57' && c.policy === 'composite:0.25' && !c.budget,
+  budget: (c) => c.k === 6 && c.radius === 'tree:0.57' && c.budget,
+  k: (c) => c.window === 8 && !c.budget && ((c.radius === 'tree:0.57' && c.policy === 'composite:0.25') || c.radius === 'none'),
+};
+let policy = null;
+
+const configName = (c) => {
+  const group = c.radius === 'none' ? 'no groups' : c.radius;
+  const keys = c.policy === 'composite:0' ? 'union' : c.policy.replace('composite:', 'share ≥ ');
+  return `${group}, ${keys}, window ${c.window}${c.budget ? `, ${c.budget}` : ''}, k ${c.k}`;
+};
+
+function drawPolicy() {
+  if (!policy) return;
+  const family = FAMILIES[el('pol-family').value];
+  const f = +el('pol-floor').value;
+  const rule = el('pol-rule').value;
+  const truth = +el('pol-truth').value;
+  const configs = policy.configs.filter(family);
+  const nBands = policy.bands.length;
+  const bins = policy.identity_bins.slice(0, -1);
+  const rows = bins.map((_, b) => b); // the last bin has no relative, so no true group
+  const POL_LAYOUT = { ...LAYOUT, margin: { ...LAYOUT.margin, b: 56 }, legend: { orientation: 'h', y: -0.42 } };
+  const lineFor = (c) => ({ name: configName(c), mode: 'lines+markers', marker: { size: 5 } });
+  const recall = (c, b) => c[rule][f][b * nBands] / policy.pairs_by_bin[b];
+  const precision = (c) => {
+    let correct = 0;
+    let wrong = (c.decoys[f] / policy.pairs) * 2; // protein reads are in frame; real reads meet chance in 2 more
+    for (let b = 0; b < policy.pairs_by_bin.length; b += 1) {
+      for (let band = 0; band < nBands; band += 1) {
+        const value = c[rule][f][b * nBands + band] / policy.pairs;
+        if (band <= truth) correct += value; else wrong += value;
+      }
+    }
+    return correct / Math.max(correct + wrong, 1e-12);
+  };
+  const axisId = { ...AXIS, title: { text: 'Query identity to its nearest relative, lower edge' } };
+  Plotly.react('plot-pol-identity', configs.map((c) => ({ ...lineFor(c), x: bins, y: rows.map((b) => recall(c, b)) })), {
+    ...POL_LAYOUT, title: { text: 'True group kept, per read pair', font: { size: 14 } }, xaxis: axisId, yaxis: { ...AXIS, title: { text: 'Recall per read pair' }, range: [0, 1] },
+  }, CONFIG);
+  Plotly.react('plot-pol-target', configs.map((c) => ({
+    ...lineFor(c), x: bins, y: rows.map((b) => c.called_true[f][b] / policy.queries_by_bin[b]),
+  })), {
+    ...POL_LAYOUT, title: { text: `True group called by any of ${policy.pairs_per_query} read pairs`, font: { size: 14 } }, xaxis: axisId, yaxis: { ...AXIS, title: { text: 'Recall per target' }, range: [0, 1] },
+  }, CONFIG);
+  const low = rows.filter((b) => bins[b] >= 0.7 && bins[b] < 0.9); // the range where policies differ
+  Plotly.react('plot-pol-size', configs.map((c) => ({
+    name: configName(c), mode: 'markers', marker: { size: 10 }, x: [c.postings],
+    y: [low.reduce((s, b) => s + recall(c, b), 0) / low.length], customdata: [precision(c)],
+    hovertemplate: `${configName(c)}<br>%{x:.3s} postings, recall %{y:.3f}, precision %{customdata:.3f}<extra></extra>`,
+  })), {
+    ...LAYOUT, showlegend: false, title: { text: 'Recall at 70–90% against postings', font: { size: 14 } },
+    xaxis: { ...AXIS, type: 'log', title: { text: `Postings, ${(policy.leaves / 1e3).toFixed(0)} k leaves` } }, yaxis: { ...AXIS, title: { text: 'Recall per read pair' }, range: [0, 1] },
+  }, CONFIG);
+  Plotly.react('plot-pol-decoys', configs.map((c) => {
+    const keep = policy.floors.map((x, i) => [x, c.decoys[i] / policy.pairs]).filter((x) => x[1] > 0 && x[0] > 0);
+    return { ...lineFor(c), x: keep.map((x) => x[0]), y: keep.map((x) => x[1]) };
+  }), {
+    ...POL_LAYOUT, title: { text: 'Decoy groups over a floor', font: { size: 14 } }, xaxis: { ...AXIS, title: { text: 'Information bit floor' } }, yaxis: { ...AXIS, type: 'log', title: { text: 'Per read pair' } },
+  }, CONFIG);
+}
+
+el('policy-form').addEventListener('input', () => { drawPolicy(); update(); });
+fetch('data/policy-mini-slice.json').then((r) => (r.ok ? r.json() : null)).then((t) => {
+  if (!t) return;
+  policy = t;
+  el('pol-floor').innerHTML = t.floors.map((x, i) => `<option value="${i}"${x === 40 ? ' selected' : ''}>${x === 0 ? 'none' : `${x} bits`}</option>`).join('');
+  drawPolicy();
+  el('policy-note').textContent = `Keys built with kfp's functions on ${t.proteins.toLocaleString()} mini-slice proteins (${t.leaves.toLocaleString()} leaves), the `
+    + `rarest k-mer per window, then a representative or a share of members, then a key budget. "frequency" keeps each group's most shared keys, kfp's untried proposal. ${t.pairs.toLocaleString()} `
+    + 'read pairs from held-out proteins, in frame, with no errors, no base index and no verification; a read\'s true group holds its query\'s nearest relative, so relatives within the radius count as correct. '
+    + 'Postings are group and k-mer pairs, without Fitch sharing. The mini-slice is denser than the release, so values do not carry over to it.';
 }).catch(() => {});
 
 // kfp's real indexes, from the benchmark table

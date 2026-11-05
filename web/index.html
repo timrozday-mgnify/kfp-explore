@@ -20,8 +20,9 @@
   #precision-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px 24px; }
   #precision-plots { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 8px; }
   #precision-plots > div { height: 360px; }
-  #benchmark-plots { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 8px; }
+  #benchmark-plots, #policy-plots { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 8px; }
   #benchmark-plots > div { height: 420px; }
+  #policy-plots > div { height: 500px; }
   .readouts { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; margin: 8px 0; }
   .readouts b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
   p.note { color: #666; max-width: 70em; }
@@ -142,6 +143,37 @@ Reduced alphabets raise identity by the share of substitutions staying within a 
 scaled 1.6× to fit simulated reads on three alphabets), and lower chance by class frequencies. Nucleotide mode reads identity as nucleotide identity, assumes 3
 letters per residue and uniform bases, and uses conservation fitted on protein with no codon
 structure, so treat it as a rough guide.</p>
+<h2>Grouping and key policy</h2>
+<form id="policy-form">
+  <label>Compare
+    <select id="pol-family">
+      <option value="policy">Key policy (tree:0.57, window 8, k 6)</option>
+      <option value="radius">Group radius (composite 0.25, window 8, k 6)</option>
+      <option value="window">Window (tree:0.57, composite 0.25, k 6)</option>
+      <option value="budget">Key budget (tree:0.57, k 6)</option>
+      <option value="k">k (window 8)</option>
+    </select>
+  </label>
+  <label>Information bit floor
+    <select id="pol-floor"></select>
+  </label>
+  <label>A read keeps
+    <select id="pol-rule">
+      <option value="cube">Every group over the floor</option>
+      <option value="best">Its best group, within 3 bits (kfp)</option>
+    </select>
+  </label>
+  <label>A hit is correct if
+    <select id="pol-truth">
+      <option value="0">In the true group only</option>
+      <option value="1">Or a relative at ≥ 0.9 identity</option>
+      <option value="2">Or a relative at ≥ 0.7</option>
+      <option value="3">Or a relative at ≥ 0.5</option>
+    </select>
+  </label>
+</form>
+<div id="policy-plots"><div id="plot-pol-identity"></div><div id="plot-pol-size"></div><div id="plot-pol-target"></div><div id="plot-pol-decoys"></div></div>
+<p class="note" id="policy-note"></p>
 <h2>Measured: kfp's indexes</h2>
 <form id="benchmark-form">
   <label>Read-out

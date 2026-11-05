@@ -317,7 +317,7 @@ Phases 1–3 are the plan. The rest is a backlog, reordered as questions come up
 - Readouts: index size at a chosen database size, and chance anchors per read.
 - *Done when:* the check's tolerances hold, and slider moves redraw with no visible lag in a browser.
 
-Phases 1–3 and 3b are built, phase 3c is partly done and phase 4 is mostly done (below). Nothing later has started.
+Phases 1–3 and 3b are built, phase 3c is partly done, phase 4 is mostly done, and phase 6 has tables and a panel (below). Phases 5 and 7–9 have not started.
 
 **Phase 2: analyse a small set in the browser.**
 
@@ -608,6 +608,34 @@ by the user.
   - **The tail is heavier than this plan's estimate.** Decoys fall 2.5–5× per 10 bits from 40 to 70 bits (slim 360 to 3 leaves, large 1,764 to 115), against the 10–12× in the Verdict and "~10× per 10 bits" under Noise floor. The steps are not geometric: 7–32× from 30 to 40 bits, probably where single k 8 and k 7 hits end. Counts above 80 bits are 20 leaves or fewer.
   - **Sticky leaves are not visible at this read count.** Among aligned decoys, the top 1% of leaves hold 5% of (leaf, read) rows, on 56,000–197,000 rows, and at most 26 for one leaf. That does not support stickiness as the cause of the k 5 gap in the last entry, but 9,191 read pairs is small and this only sees decoys that reached alignment. The k 5 gap itself is untested here: no tier uses k 5, and the k 8 tables are 1–7× high at 40 bits, on few counts.
   - **Not usable from this run:** per-(k, m) tails, since layers are pooled; retention by policy and radius, since keys and indexes are not in the results; anything about growth, with one index size; precision against background.
+
+- **2026-11-05: phase 6, grouping and key policy.** `measure/policy_tables.py` holds out 4,000 proteins, then builds keys with kfp's own `layer_groups`, `window_kmers`, `on_reps` and `allocate` on the other 274,554 mini-slice proteins, for 32 configurations. 3,000 read pairs and reversed decoys (100 queries per identity bin, 3 pairs each) are scored with kfp's evidence: in frame, no errors, no base index, no verification. It takes about 25 minutes on two threads, 10.6 GB peak. The page's new panel compares policy, radius, window, budget and k at any floor (`web/data/policy-mini-slice.json`, 114 KB). `checks/test_policy.py` passes.
+  - **Phase's "done when": met for ordering, not for size of effect.**
+    - Retention against kfp's table (32 keys, groups of at least 8): RMSE 0.087, and frequency > share ≥ 0.25 > union at every bin from 0.7 up. Frequency over share is 1.27–1.41× at 0.7–0.9, against kfp's 1.4–1.5×. Values run 0.15–0.20 high at 0.8–0.85, on 26–75 queries per bin.
+    - kfp's matched comparisons, 10 configurations at window 8: rank correlation 0.66 for recall and 0.75 for postings. Effects are larger here: composite 0.75 falls by 0.20–0.26 in recall per target, against kfp's 0.08–0.12, as expected with no base index or neighbour rule, but that has not been tested. Postings relative to composite 0.25 are within 0.86–1.13× of kfp's among policies, but 1.34× for `units` and 1.24× for `tree:0.34`. kfp's are on the quarter sample with Fitch sharing and these are raw on a denser set, which may explain it.
+  - **Grouped keys explain most of the heavier chance tail.** Decoys per posting at k 5, window 8: 40 bits, 1.6 × 10⁻⁹ with no groups (as the hash-sampled tables), 13 × 10⁻⁹ on `tree:0.57` composites and 4 × 10⁻⁹ with `sqrt:14` (8 decoys). The rise is 8.5× at k 5, 5.8× at k 6 and 2.4× at k 7 at 40 bits, and 2–7× at 30 bits. On `sqrt:14` at k 5, decoys per pair are 0.118 at 30 bits and 0.0027 at 40, against kfp's 0.089 and 0.0074: now within 3×, from 4–25×. It is not a few sticky groups: at 30–40 bits the top 1% of groups hold 4–6% of decoys where counts are large. More keys per group, so more multi-hit chance, would fit, but is untested. In absolute terms grouping costs little: 6× fewer postings at about the same decoys per pair at 40 bits (0.045 against 0.032, k 5).
+  - **Frequency ranking is not a clear gain at matched chance, the first end-to-end test of kfp's proposal.** At `sqrt:14`, k 6, at the same floor (40 bits) it adds recall at low identity (per target 0.35 against 0.23 at 0.7–0.75, 0.69 against 0.59 at 0.8–0.85), but has 3.6× the decoys (29 against 8) and lower precision (0.45 against 0.56 at x ≥ 0.7). At matched decoys (frequency at 40 bits, share at 30, 29 against 28): per target 0.35 / 0.55 / 0.69 / 0.83 / 0.90 against 0.28 / 0.62 / 0.69 / 0.83 / 0.95 at 0.7 / 0.75 / 0.8 / 0.85 / 0.9, with precision 0.45 against 0.42. Differences are within noise (about ±0.05 per bin). The extra hits appear to come with extra chance.
+  - **Groups against singles.** k 6, window 8: `tree:0.57` composite 0.25 uses 0.15× the postings of one key set per leaf, for per-target recall of 0.92 / 0.96 / 0.93 against 0.87 / 0.96 / 1.00 at 0.7 / 0.75 / 0.8 at 40 bits, and precision at x ≥ 0.7 of 0.21 against 0.18. Radius changes postings by 0.91–1.41× with small recall changes, in line with kfp's "grouping matters less than the window".
+  - **Limits.** One hash and read draw, on a set denser than the release. Decoys above 40 bits rest on few counts. Identities of relatives come from the top 100 candidates per query, others count as wrong for "or a relative". The page's other panels (anchor recall, precision) do not yet take radius or policy.
+
+- **2026-11-05: on-demand precision, timing test.** A throwaway script, not on the page: the steps of `precision_tables.py` for one (k, m) in Pyodide in a worker, in the desktop app's browser pane, on the 44 k sample (42,770 groups after holding out 1,500 queries; 4,500 read pairs and their decoys, 8 salts, 11 floors, every-group and best-group rules, per-target). One run, on this laptop. Relative labels and table output are not included, and truth bands are stand-ins, so this times the work, not the values.
+
+  | k | m | Read pairs | Rows | Index, s | Find hits, s | Score, s | Total, s |
+  | --- | --- | --- | --- | --- | --- | --- | --- |
+  | 13 | 8 | 4,500 | 110 k | 19.1 | 3.5 | 1.8 | 24.4 |
+  | 11 | 8 | 4,500 | 160 k | 20.8 | 3.1 | 2.2 | 26.0 |
+  | 9 | 8 | 4,500 | 266 k | 19.5 | 2.9 | 3.1 | 25.5 |
+  | 9 | 1 | 4,500 | 266 k | 17.3 | 2.8 | 3.8 | 23.9 |
+  | 7 | 8 | 4,500 | 545 k | 6.7 | 1.3 | 0.9 | 8.9 |
+  | 7 | 1 | 4,500 | 545 k | 5.5 | 1.3 | 1.4 | 8.2 |
+  | 6 | 8 | 4,500 | 1.1 M | 5.2 | 1.3 | 1.4 | 7.9 |
+  | 5 | 8 | 4,500 | 5.6 M | 4.8 | 1.3 | 4.8 | 10.8 |
+  | 5 | 8 | 500 | 619 k | 5.3 | 0.1 | 0.5 | 5.9 |
+  | 4 | 8 | 100 | 1.1 M | 4.2 | 0.2 | 0.8 | 5.1 |
+
+  - **On-demand is feasible at k 5–13 with no cap on queries:** 8–26 s the first time, then about 1–5 s for a new m and about 2–7 s for a new read length, once the index is held in memory. Start-up is about 4 s. The wasm heap reached 1.36 GB.
+  - **The slow step is not the one expected.** Low k was the worry, but k 5 takes 11 s. Building the index takes 17–21 s at k ≥ 9 and about 5 s at k ≤ 7, for reasons not traced. It runs once per (k, alphabet), so it is the step to speed up, and caching it may help more than caching results.
+  - **k 4 needs a cap.** 100 read pairs give 1.1 M rows, so 4,500 would give about 50 M. About 500 pairs should match k 5's cost; that is an extrapolation. k 1–3 are untested and will be heavier.
 
 ## Licence
 
