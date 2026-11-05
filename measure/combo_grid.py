@@ -5,7 +5,7 @@ sim_grid.py. Recall needs only the true group, so every sparsity comes from one 
 from the index's features at one sparse level and scaled, since an index of them all would be too large.
 
 Run from kfp's checkout, one job with capped threads:
-RAYON_NUM_THREADS=2 POLARS_MAX_THREADS=2 .venv/bin/python <this file> data/mini-slice/members.parquet --out web/data/sim-combo.json
+RAYON_NUM_THREADS=2 POLARS_MAX_THREADS=2 .venv/bin/python <this file> data/mini-slice/members.parquet --out checks/data/sim-combo.json
 """
 
 import argparse

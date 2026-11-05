@@ -95,10 +95,11 @@ function liveProblem(p) {
   return null;
 }
 
-function askLive(p) {
+function ensureLiveWorker() {
   if (!liveWorker) {
     liveWorker = new Worker('live.js');
     liveWorker.onmessage = ({ data }) => {
+      if (data.comboId) { onCombo(data); return; }
       if (data.id !== liveId) return;
       const off = el('precision-unavailable');
       if (data.progress) {
@@ -111,6 +112,10 @@ function askLive(p) {
       if (data.result) { liveAnswered = data.id; drawPrecision(data.result, latest, true); }
     };
   }
+}
+
+function askLive(p) {
+  ensureLiveWorker();
   liveId += 1;
   const id = liveId;
   liveWorker.postMessage({ ...p, id });
@@ -234,8 +239,48 @@ function drawSnp(q, p) {
   }, CONFIG);
 }
 
-let comboGrid = null;
-fetch('data/sim-combo.json').then((r) => (r.ok ? r.json() : null)).then((g) => { comboGrid = g; }).catch(() => {});
+// The combination panel's simulated points are computed on demand, shortly after the sliders settle.
+let comboId = 0;
+let comboTimer = null;
+let comboDraw = null;
+
+function askCombo(p) {
+  clearTimeout(comboTimer);
+  comboId += 1;
+  const id = comboId;
+  comboTimer = setTimeout(() => {
+    ensureLiveWorker();
+    liveWorker.postMessage({ ...p, comboId: id });
+  }, 500);
+}
+
+function onCombo(data) {
+  if (data.comboId !== comboId) return;
+  const status = el('c-sim-status');
+  if (data.progress) status.textContent = 'Simulating these features on the bundled set…';
+  if (data.comboError) status.textContent = `Could not simulate: ${data.comboError}`;
+  if (data.combo) {
+    comboDraw = data.combo;
+    drawComboPoints();
+  }
+}
+
+function drawComboPoints() {
+  const sim = comboDraw;
+  const p = latest;
+  if (!sim || !el('plot-combo-identity').data) return;
+  const level = Math.round(Math.log2(p.m));
+  const mids = sim.bins.slice(0, -1).map((b, i) => (b + Math.min(sim.bins[i + 1], 1)) / 2);
+  const plot = el('plot-combo-identity');
+  const lines = plot.data.filter((t) => !t.name.startsWith('Simulated'));
+  lines.push({ x: mids, y: sim.recall[level], ...SIMULATED, name: `Simulated (${p.index})` });
+  Plotly.react(plot, lines, plot.layout, CONFIG);
+  const near = mids.reduce((best, x, i) => (Math.abs(x - p.identity) < Math.abs(mids[best] - p.identity) ? i : best), 0);
+  el('c-sim-recall').textContent = sim.recall[level][near].toFixed(3);
+  el('c-sim-ratio').textContent = sim.matches >= 10 ? `${(sim.chance_m1 / sim.composition_m1).toFixed(2)} (${sim.matches})` : `too few (${sim.matches})`;
+  el('c-sim-chance').textContent = sim.matches >= 10 ? compact(sim.chance_m1 / p.m) : '–';
+  el('c-sim-status').textContent = `Simulated on ${sim.pairs.toLocaleString()} read pairs${sim.index_share < 1 ? `, and ${(sim.index_share * 100).toFixed(0)}% of the index for chance` : ''}${sim.computed_s ? `, in ${sim.computed_s.toFixed(1)} s` : ''}. Kept in this browser.`;
+}
 
 function drawCombo(q, p) {
   const off = el('combo-unavailable');
@@ -261,13 +306,6 @@ function drawCombo(q, p) {
     { x: q.identity, y: q.single_equal, name: `k ${p.k}, ${equal} (same postings)`, mode: 'lines', line: { color: '#2c6fbb' } },
     { x: q.identity, y: q.single_weight, name: `k ${q.weight}, ${equal} (same postings, same letters)`, mode: 'lines', line: { color: '#c0392b' } },
   ];
-  const row = p.alphabet === 'protein' && p.length === (comboGrid?.mate) && p.paired
-    ? comboGrid?.rows.find((x) => x.k === p.k && x.n === p.combo_n && x.lo === p.combo_lo && x.hi === p.combo_hi) : null;
-  const level = Math.log2(p.m);
-  if (row && row.recall[level]) {
-    const mids = comboGrid.bins.slice(0, -1).map((b, i) => (b + Math.min(comboGrid.bins[i + 1], 1)) / 2);
-    lines.push({ x: mids, y: row.recall[level], ...SIMULATED });
-  }
   Plotly.react('plot-combo-identity', lines, {
     ...LAYOUT, uirevision: 1, legend: { orientation: 'h', y: -0.28 }, title: { text: `Anchor recall (read of ${p.length} letters)`, font: { size: 14 } },
     xaxis: { ...AXIS, title: { text: 'Identity' } }, yaxis: { ...AXIS, title: { text: 'Anchor recall' }, range: [0, 1] },
@@ -296,9 +334,23 @@ function drawCombo(q, p) {
   }], { ...LAYOUT, uirevision: 1, title: { text: 'Chance anchors per read, log10', font: { size: 14 } }, ...scanAxes }, CONFIG);
 }
 
+let lastComboKey = '';
 function draw(r, p) {
   if (r.snp) drawSnp(r.snp, p);
-  if (r.combo) drawCombo(r.combo, p);
+  if (r.combo) {
+    drawCombo(r.combo, p);
+    const key = [p.index, p.alphabet, p.k, p.combo_n, p.combo_lo, p.combo_hi, p.length, p.paired].join('|');
+    if (!r.combo.available || p.alphabet === 'dna') {
+      el('c-sim-status').textContent = p.alphabet === 'dna' ? 'No simulation for nucleotide mode: the bundled sets have no nucleotide relatives.' : '';
+      lastComboKey = '';
+    } else if (key !== lastComboKey) {
+      lastComboKey = key;
+      comboDraw = null;
+      for (const id of ['c-sim-recall', 'c-sim-ratio', 'c-sim-chance']) el(id).textContent = '–';
+      el('c-sim-status').textContent = 'Simulating shortly…';
+      askCombo(p);
+    } else if (comboDraw) drawComboPoints();
+  }
   el('recall').textContent = r.recall.toFixed(3);
   el('index').textContent = size(r.index_gb);
   el('postings').textContent = r.postings.toExponential(1).replace('e+', 'e');

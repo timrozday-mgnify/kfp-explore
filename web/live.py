@@ -359,3 +359,126 @@ def panel(request):
         model.load_table("live", json.dumps({**group["meta"], "k": group["k"]}))
         group["loaded"], _loaded = True, key
     return json.dumps(model.compute_precision({**a, "index": "live", "m": 1}))
+
+
+# Combination k-mers on demand: recall on the true group, chance from a sample of the index's features.
+COMBO_READ_WORK = 6e7  # feature sets x letters, reads and true groups together
+COMBO_INDEX_WORK = 5e7  # feature sets x index letters
+COMBO_INDEX_KEEP = 3e6  # index features held, by sampling on the hash
+MIX = np.uint64(0x9E3779B97F4A7C15)
+FEATURE = np.uint64(0x100000001B3)
+
+
+def _at_level(h, at):
+    """level(h) >= at, without the rest of level's work: the mixed hash's low bits are zero."""
+    z = h.astype(np.uint64) + np.uint64(0x9E3779B97F4A7C15)
+    z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+    z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    z = z ^ (z >> np.uint64(31))
+    return (z & np.uint64(2**at - 1)) == 0
+
+
+def _codes(seqs, table, k):
+    """Each position's k-mer code (-1 if none) and sequence, over sequences joined by separators."""
+    a = table[np.frombuffer(b"*".join(seqs), np.uint8)]
+    x, at = analyse.kmers(a, k)
+    code = np.full(len(a), -1, np.int64)
+    code[at] = x
+    return code, np.cumsum(a == analyse.SEPARATOR).astype(np.int32)
+
+
+def _features(code, owner, offsets):
+    """(owner, hash) of one set of offsets, gaps not hashed. A later k-mer must share the sequence."""
+    last = offsets[-1] if offsets else 0
+    i = np.arange(max(len(code) - last, 0))
+    ok = code[i] >= 0
+    h = code[i].astype(np.uint64)
+    for o in offsets:
+        ok &= (code[i + o] >= 0) & (owner[i + o] == owner[i])
+        h = h * FEATURE + code[i + o].astype(np.uint64)
+    return owner[i[ok]], h[ok]
+
+
+def _distinct(owner, h):
+    """Distinct (owner, hash), as (owner, hash) arrays."""
+    key = h + owner.astype(np.uint64) * MIX
+    _, first = np.unique(key, return_index=True)
+    return owner[first], h[first]
+
+
+def combo_simulate(request):
+    """Recall per read pair by identity bin at each sampling level, and decoy matches, for one window.
+    Very wide windows use fewer read pairs, and a part of the index for chance, which is scaled up."""
+    a = json.loads(request)
+    name, alphabet, k, n, lo, hi, length, paired = (
+        a["index"], a["alphabet"], a["k"], a["combo_n"], a["combo_lo"], a["combo_hi"], a["length"], a["paired"],
+    )  # fmt: skip
+    d = DATA[name]
+    if "group_list" not in d:
+        d["group_list"] = bytes(d["index"]).split(b"*")
+    sets = model.combo_sets(n, lo, hi)
+    table = encoding(alphabet)
+    mates = 2 if paired else 1
+    need = mates * length * len(d["query_list"]) * PAIRS_PER_QUERY + sum(map(len, d["query_list"]))
+    cap = int(len(d["query_list"]) * PAIRS_PER_QUERY * min(COMBO_READ_WORK / (len(sets) * need), 1))
+    pair_q, reads, decoys, _ = read_set(name, length, paired, cap)
+    pair_bin = d["bin"][pair_q].astype(np.int32)
+    best = d["best"][pair_q]
+    wanted = np.unique(best[best >= 0])
+    group_code, group_owner = _codes([d["group_list"][g] for g in wanted], table, k)
+    true_group = np.searchsorted(wanted, best).astype(np.int64)
+    true_group[best < 0] = -1
+
+    group_keys = []
+    for offsets in sets:
+        o, h = _features(group_code, group_owner, offsets)
+        group_keys.append(h + o.astype(np.uint64) * MIX)
+    group_keys = np.unique(np.concatenate(group_keys))
+    read_code, read_owner = _codes(reads, table, k)
+    hit_owner, hit_h = [], []
+    for offsets in sets:
+        o, h = _features(read_code, read_owner, offsets)
+        pair = o // mates
+        keep = true_group[pair] >= 0
+        o, h, pair = o[keep], h[keep], pair[keep]
+        key = h + true_group[pair].astype(np.uint64) * MIX
+        at = np.searchsorted(group_keys, key)
+        at[at == len(group_keys)] = 0
+        on = group_keys[at] == key
+        hit_owner.append(o[on])
+        hit_h.append(h[on])
+    owner, h = _distinct(np.concatenate(hit_owner), np.concatenate(hit_h))
+    lv = level(h)
+    pair = owner // mates
+    counts = np.maximum(np.bincount(pair_bin, minlength=len(BINS)), 1)
+    recall = []
+    for j in range(LEVELS):
+        passed = np.bincount(pair[lv >= j], minlength=len(pair_q)) > 0
+        recall.append((np.bincount(pair_bin, weights=passed, minlength=len(BINS)) / counts)[:-1].round(4).tolist())
+
+    # Chance: a share of the index's groups, and of their features by hash level.
+    residues = int(d["index"].size)
+    stride = int(np.ceil(len(sets) * residues / COMBO_INDEX_WORK))
+    part = d["group_list"][:: max(stride, 1)]
+    part_letters = sum(map(len, part))
+    keep_level = max(int(np.ceil(np.log2(max(len(sets) * part_letters / COMBO_INDEX_KEEP, 1)))), 0)
+    index_code, index_owner = _codes(part, table, k)
+    held = []
+    for offsets in sets:
+        o, h = _features(index_code, index_owner, offsets)
+        kept = _at_level(h, keep_level)
+        held.append(_distinct(o[kept], h[kept])[1])
+    held = np.sort(np.concatenate(held))
+    decoy_code, decoy_owner = _codes(decoys, table, k)
+    matches = 0
+    for offsets in sets:
+        o, h = _features(decoy_code, decoy_owner, offsets)
+        kept = _at_level(h, keep_level)
+        o, h = _distinct(o[kept] // mates, h[kept])
+        matches += int((np.searchsorted(held, h, side="right") - np.searchsorted(held, h, side="left")).sum())
+    scale = 2.0**keep_level * residues / max(part_letters, 1)
+    return json.dumps({
+        "recall": recall, "bins": BINS, "pairs": len(pair_q), "sets": len(sets), "matches": matches,
+        "index_share": part_letters / residues, "keep_level": keep_level, "chance_m1": matches * scale / len(pair_q),
+        "composition_m1": model.combo_chance(length, k, n, lo, hi, paired, 1, residues, model.alphabet_stats(alphabet)[1]),
+    })  # fmt: skip

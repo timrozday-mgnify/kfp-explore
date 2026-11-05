@@ -120,6 +120,28 @@ assert abs(by_k[15]["target_recall"] - by_k[14]["target_recall"]) < 0.03
 assert by_k[4]["measured_pairs"] < 4500 and by_k[1]["recall"] > 0.8  # any hit counts with no floor
 assert panel(k=5, m=1, floor=0, alphabet="dayhoff")["measured_pairs"] < 4500
 
+# Combination k-mers on demand, against the native simulation (other queries).
+grid = json.loads((ROOT / "checks/data/sim-combo.json").read_text())
+errors, ratios = [], []
+for row in grid["rows"]:
+    if row["n"] < 2:
+        continue
+    if row["feature_sets"] > 40:
+        continue
+    got = json.loads(live.combo_simulate(request(k=row["k"], combo_n=row["n"], combo_lo=row["lo"], combo_hi=row["hi"])))
+    gap = np.array(got["recall"])[:8] - np.array(row["recall"])
+    errors.append(gap.ravel())
+    if got["matches"] >= 50 and row["chance_matches"] >= 50:
+        ratios.append(got["chance_m1"] / row["chance_per_pair_m1"])
+    print(f"k{row['k']} n{row['n']} {row['lo']}-{row['hi']}: {got['pairs']} pairs, recall gap {np.sqrt(np.mean(gap**2)):.3f}, "
+          f"chance {got['chance_m1']:.3g} / {row['chance_per_pair_m1']:.3g} from {got['matches']}, index share {got['index_share']:.2f}")
+rmse = float(np.sqrt(np.mean(np.concatenate(errors) ** 2)))
+print(f"on demand against native: recall RMSE {rmse:.3f}; chance ratio {min(ratios):.2f} to {max(ratios):.2f}")
+assert rmse < 0.06 and 0.5 < min(ratios) and max(ratios) < 2
+wide = json.loads(live.combo_simulate(request(k=4, combo_n=3, combo_lo=1, combo_hi=60)))
+print(f"wide window: {wide['sets']} sets, {wide['pairs']} pairs, index share {wide['index_share']:.3f}")
+assert wide["pairs"] < 4500 and wide["index_share"] < 1
+
 # A stored result gives the same panel, without the sequences.
 r = request(k=9, m=16)
 text = live.compute(r)

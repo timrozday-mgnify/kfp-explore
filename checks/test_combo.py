@@ -12,7 +12,7 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "web"))
 import model  # noqa: E402
 
-t = json.loads((ROOT / "web/data/sim-combo.json").read_text())
+t = json.loads((ROOT / "checks/data/sim-combo.json").read_text())
 ids = model.COMBO_IDENTITIES
 mid = (np.array(t["bins"][:-1]) + np.array(t["bins"][1:])) / 2
 mid[-1] = 0.99
