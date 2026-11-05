@@ -22,6 +22,7 @@ uv run --no-project --with numpy python checks/test_policy.py  # grouping and ke
 uv run --no-project --with numpy python checks/test_live.py  # on-demand precision against the tables
 uv run --no-project --with numpy python checks/test_snp.py  # SNP panel against brute force and simulation
 uv run --no-project --with numpy python checks/test_combo.py  # combination k-mers against simulation and kfp
+<kfp>/.venv/bin/python checks/test_scale.py <members.parquet>  # scale profile's sampling and slices
 uv run --no-project --with numpy python measure/fit_rate.py web/data/sim-grid.json web/data/sim-grid-slice.json  # fit the read rate on each set
 ```
 

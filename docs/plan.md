@@ -701,6 +701,11 @@ by the user.
 
       Reading across at equal recall, near windows gain up to about 0.04 precision on single k-mers at middling recall, about what the wider postings of some rows would buy, and far windows lose. Pair scores also take fewer steps across floors. This is one mini-slice, 4 hash draws and representatives, with reads in frame and no errors; the release has far more relatives per read.
 
+- **2026-11-05: scale profile workflow.** `measure/scale-profile/` (Nextflow, SLURM and Singularity; `run.sh` for the user's HPC run) implements Scaling to full size: nested samples of 10⁵ to 10⁸ proteins by a hash of `protein_id`, whole-release anchors, and per rung units, singletons, lengths, composition, k-mer spectra at k 5–13 from a hash slice sized to memory, decoys and matches between random halves, and the homologue spectrum from 2,000 held-out proteins aligned with DIAMOND. `check.tsv` predicts each statistic's largest rung from the others. **Not run at scale; no results yet.**
+  - **Checked locally** (test profile on the mini-slice, 294,822 proteins, rungs to 60,000; `checks/test_scale.py`; DIAMOND in Docker): all 33 tasks complete. Rungs are nested, queries lie outside every rung, and sampling is uniform. At a 1 in 8 slice, distinct k-mers and windows stay within 5% of the whole; decoys over composition are 1.18 / 1.20 at k 5 and 1.59 / 1.62 at k 7, and noisy at k 9 (6.0 / 10.1) from few matches. Decoys at k 5 and 7 agree with the earlier 1.2 and 1.3–1.9. The local check predicts the largest rung within 0.86–1.40× over all statistics, and distinct k-mers and units at 1.09–1.20×, on a set that is not uniform MGnify, so it is not the release's band.
+  - **Costs at release are estimates, not measured:** 64 GB per bucket, 96 GB for k-mer counts and 256 GB with 32 CPUs for DIAMOND on the largest rung. Nothing in the page reads `scale-profile.json` yet; that is phase 5.
+  - **Not included:** decoy tails per (k, m) on a real index, sticky leaves, and key retention by policy and radius, which need indexes built on the rungs.
+
 ## Licence
 
 GPL-3.0-or-later.
