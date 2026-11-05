@@ -83,6 +83,29 @@ async function handleCombo(r) {
     await store('readwrite', (s) => s.put(text, key));
   }
   postMessage({ comboId: r.comboId, combo: JSON.parse(text) });
+  if (pendingCombo) return; // a newer setting is waiting
+  // Precision: this feature, then single k-mers with as many letters at equal postings.
+  const level = Math.round(Math.log2(r.m));
+  postMessage({ comboId: r.comboId, precisionProgress: true });
+  const own = await precisionText(r, level);
+  postMessage({ comboId: r.comboId, view: JSON.parse(live.combo_view(own, level, JSON.stringify(r))) });
+  if (pendingCombo || r.combo_n * r.k > r.length) return;
+  const single = { ...r, k: r.combo_n * r.k, combo_n: 1, combo_lo: 0, combo_hi: 0 };
+  const singleLevel = Math.max(Math.round(Math.log2(r.m / r.g)), 0);
+  const other = await precisionText(single, singleLevel);
+  postMessage({ comboId: r.comboId, singleView: JSON.parse(live.combo_view(other, singleLevel, JSON.stringify(r))), singleK: single.k, singleM: 2 ** singleLevel });
+}
+
+async function precisionText(r, level) {
+  const keyAt = (l) => ['comboPrecision', COMBO_VERSION, r.index, r.alphabet, r.k, r.combo_n, r.combo_lo, r.combo_hi, r.length, r.paired, l].join('|');
+  for (let l = level; l >= Math.max(level - 5, 0); l -= 1) { // a stored run covers several levels upward
+    const stored = await store('readonly', (s) => s.get(keyAt(l)));
+    if (stored) return stored;
+  }
+  await ensureData(r.index, r.comboId);
+  const text = live.combo_precision(JSON.stringify({ ...r, level }));
+  await store('readwrite', (s) => s.put(text, keyAt(level)));
+  return text;
 }
 
 async function run() { // precision first: it answers the panel in view of most slider moves

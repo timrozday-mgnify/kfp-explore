@@ -482,3 +482,192 @@ def combo_simulate(request):
         "index_share": part_letters / residues, "keep_level": keep_level, "chance_m1": matches * scale / len(pair_q),
         "composition_m1": model.combo_chance(length, k, n, lo, hi, paired, 1, residues, model.alphabet_stats(alphabet)[1]),
     })  # fmt: skip
+
+
+# Precision for combination k-mers: hits on every group, for a range of sampling levels from one pass.
+PRECISION_LEVELS = 6  # levels computed upward from the one asked for
+PRECISION_KEEP = 8e6  # index features held, over the salts
+PRECISION_WORK = 5e7  # feature sets x index letters, per salt
+PRECISION_HITS = 1.5e7  # (read pair, group) hits
+SALT = 0x51ED27
+
+
+def _features_q(code, owner, running, k, offsets):
+    """As _features, with each feature's composition bits over the letters it fixes."""
+    last = offsets[-1] if offsets else 0
+    i = np.arange(max(len(code) - last - k + 1, 0))
+    ok = code[i] >= 0
+    h = code[i].astype(np.uint64)
+    q = running[i + k] - running[i] if len(i) else np.zeros(0)
+    prev = 0
+    for o in offsets:
+        ok &= (code[i + o] >= 0) & (owner[i + o] == owner[i])
+        h = h * FEATURE + code[i + o].astype(np.uint64)
+        q = q + running[i + o + k] - running[i + max(prev + k, o)]
+        prev = o
+    return owner[i[ok]], h[ok], q[ok]
+
+
+def _coded(seqs, table, k):
+    a = table[np.frombuffer(b"*".join(seqs), np.uint8)]
+    x, at = analyse.kmers(a, k)
+    code = np.full(len(a), -1, np.int64)
+    code[at] = x
+    return a, code, np.cumsum(a == analyse.SEPARATOR).astype(np.int32)
+
+
+def combo_precision(request):
+    """Precision, recall and chance per read pair, by floor, for levels from the one asked for. Features
+    are scored as kfp's keys are: composition less log2 of the groups holding them, with the charge per
+    further hit counting every feature a read tries. Where the index is too large, a share of its groups
+    is used, true groups always among them, and hits on the others are scaled up."""
+    a = json.loads(request)
+    name, alphabet, k, n, lo, hi, length, paired, at = (
+        a["index"], a["alphabet"], a["k"], a["combo_n"], a["combo_lo"], a["combo_hi"], a["length"], a["paired"],
+        int(a["level"]),
+    )  # fmt: skip
+    d = DATA[name]
+    if "group_list" not in d:
+        d["group_list"] = bytes(d["index"]).split(b"*")
+    sets = model.combo_sets(n, lo, hi)
+    g_sets = len(sets)
+    salts = [SALT * s for s in range(1, 5 if g_sets <= 20 else 3)]
+    table = encoding(alphabet)
+    mates = 2 if paired else 1
+    pair_q, reads, decoys, each = read_set(name, length, paired)
+    residues = int(d["index"].size)
+    share = min(1.0, PRECISION_WORK / (g_sets * residues), PRECISION_KEEP * 2.0**at / (len(salts) * g_sets * residues))
+    stride = max(int(np.ceil(1 / share)), 1)
+    wanted = np.unique(d["best"][d["best"] >= 0])
+    ids = np.union1d(np.arange(0, len(d["group_list"]), stride), wanted)
+    share = float(len(np.arange(0, len(d["group_list"]), stride))) / len(d["group_list"])
+    a_index, code, owner = _coded([d["group_list"][i] for i in ids], table, k)
+    letters = np.bincount(a_index[a_index < 21], minlength=21)[:20].astype(float)
+    log_f = np.zeros(256)
+    log_f[:20] = -np.log2(np.maximum(letters / letters.sum(), 1e-12))
+    held_h, held_g = [], []
+    for offsets in sets:
+        o, h = _features(code, owner, offsets)
+        kept = np.zeros(len(h), bool)
+        for salt in salts:
+            kept |= _at_level(h ^ np.uint64(salt), at)
+        o, h = _distinct(o[kept], h[kept])
+        held_h.append(h)
+        held_g.append(o)
+    held_h, held_g = np.concatenate(held_h), np.concatenate(held_g)
+    held_g, held_h = _distinct(held_g, held_h)
+    o = np.argsort(held_h, kind="stable")
+    held_h, held_g = held_h[o], held_g[o]
+    first = np.flatnonzero(np.r_[True, held_h[1:] != held_h[:-1]]) if len(held_h) else np.zeros(0, int)
+    keys = held_h[first]
+    holders = np.diff(np.r_[first, len(held_h)]).astype(np.intp)  # wasm32 repeats by int32
+    q_of_key = np.zeros(len(keys))
+
+    def lookup(seqs):
+        """Distinct (read pair, key position) a read's features share with the held index."""
+        a_reads, c, w = _coded(seqs, table, k)
+        running = np.r_[0.0, np.cumsum(log_f[a_reads])]
+        pairs, positions = [], []
+        for offsets in sets:
+            mate, h, q = _features_q(c, w, running, k, offsets)
+            p = np.searchsorted(keys, h)
+            p[p == len(keys)] = 0
+            found = keys[p] == h if len(keys) else np.zeros(len(h), bool)
+            q_of_key[p[found]] = q[found]
+            pairs.append(mate[found] // mates)
+            positions.append(p[found])
+        pairs, positions = np.concatenate(pairs), np.concatenate(positions)
+        unique_rows = np.unique(pairs.astype(np.int64) * (len(keys) + 1) + positions)
+        return (unique_rows // (len(keys) + 1)).astype(np.int32), unique_rows % (len(keys) + 1)
+
+    r_pair, r_key = lookup(reads)
+    total_hits = float(holders[r_key].sum()) if len(r_key) else 0.0
+    n_pairs = len(pair_q)
+    kept_pairs = n_pairs
+    if total_hits > PRECISION_HITS:  # every few read pairs, across all queries
+        step = int(np.ceil(total_hits / PRECISION_HITS))
+        keep = r_pair % step == 0
+        r_pair, r_key = r_pair[keep], r_key[keep]
+        kept_pairs = len(np.arange(0, n_pairs, step))
+    d_pair, d_key = lookup(decoys)
+    d_keep = d_pair % max(n_pairs // max(kept_pairs, 1), 1) == 0
+    d_pair, d_key = d_pair[d_keep], d_key[d_keep]
+
+    def expand_rows(pairs, positions):
+        positions = positions.astype(np.intp)
+        counts = holders[positions]
+        total = int(counts.sum(dtype=np.int64))
+        rows = np.repeat(first[positions], counts) + (np.arange(total) - np.repeat(np.cumsum(counts) - counts, counts))
+        groups = ids[held_g[rows]].astype(np.int64)
+        scale = int(d["groups"]) + 2
+        uniq, inverse = np.unique(np.repeat(pairs, counts).astype(np.int64) * scale + groups, return_inverse=True)
+        return uniq // scale, uniq % scale, inverse.astype(np.int32), np.repeat(positions, counts)
+
+    pair, group, inverse, key_of = expand_rows(r_pair, r_key)
+    _, _, d_inverse, d_key_of = expand_rows(d_pair, d_key)
+    q_of = pair_q[pair].astype(np.int64)
+    true = group == d["best"][q_of]
+    scale = int(d["groups"]) + 2
+    wanted_key = q_of * scale + group
+    at_key = np.searchsorted(d["aligned_key"], wanted_key)
+    at_key[at_key == len(d["aligned_key"])] = 0
+    known = d["aligned_key"][at_key] == wanted_key
+    band = np.where(known, np.digitize(d["aligned_x"][at_key], X_EDGES) - 1, len(X_EDGES) - 1)
+    pair_bin = d["bin"][pair_q].astype(np.int32)
+    cell = (pair_bin[pair] * N_BANDS + np.where(true, 0, band + 1)).astype(np.int32)
+    in_group_all = ~true
+    bits = np.maximum(q_of_key - np.log2(np.maximum(holders / share, 1)), 0)
+    charge = float(np.log2(mates * TRANSLATED_FRAMES * max(length - k + 1, 1) * g_sets))
+    n_cells = len(BINS) * N_BANDS
+    row_n, d_n = len(pair), int(d_inverse.max(initial=-1)) + 1
+    starts = np.flatnonzero(np.r_[True, pair[1:] != pair[:-1]]) if row_n else np.zeros(0, np.int32)
+    weight = np.where(in_group_all, 1 / share, 1.0)  # hits on the other groups stand for the rest
+    out = {}
+    for level_at in range(at, min(at + PRECISION_LEVELS, LEVELS)):
+        cube = np.zeros((len(FLOORS), n_cells))
+        best = np.zeros((len(MARGINS), len(FLOORS), n_cells))
+        decoy_count = np.zeros(len(FLOORS))
+        for salt in salts:
+            lv = level(keys ^ np.uint64(salt))
+            score, _, _ = scored(inverse, key_of, bits, lv, level_at, row_n, charge)
+            d_score, _, _ = scored(d_inverse, d_key_of, bits, lv, level_at, d_n, charge)
+            top = np.repeat(np.maximum.reduceat(score, starts), np.diff(np.r_[starts, row_n])) if row_n else score
+            for f, floor in enumerate(FLOORS):
+                on = score >= floor if floor else score > -np.inf
+                cube[f] += np.bincount(cell[on], weights=weight[on], minlength=n_cells)
+                for g, margin in enumerate(MARGINS):
+                    kept = on & (score >= top - margin)
+                    best[g, f] += np.bincount(cell[kept], weights=weight[kept], minlength=n_cells)
+                decoy_count[f] += (d_score >= floor if floor else d_score > -np.inf).sum() / share
+        out[level_at] = {"cube": (cube / len(salts)).round(2).tolist(), "best": (best / len(salts)).round(2).tolist(),
+                         "decoys": (decoy_count / len(salts)).round(2).tolist()}  # fmt: skip
+    return json.dumps({
+        "levels": out, "from_level": at, "pairs": kept_pairs,
+        "pairs_by_bin": (np.bincount(pair_bin, minlength=len(BINS)) * kept_pairs // max(n_pairs, 1)).tolist(),
+        "floors": list(FLOORS), "margins": list(MARGINS), "x_edges": X_EDGES.tolist(), "n_bands": N_BANDS,
+        "index_share": share, "sets": g_sets, "salts": len(salts), "each": each,
+    })  # fmt: skip
+
+
+def combo_view(text, level_at, a_json):
+    """By floor, at one level: recall, precision and others per read pair, at the precision panel's
+    rule, truth and identity mix."""
+    t = json.loads(text)
+    a = json.loads(a_json)
+    entry = t["levels"][str(level_at)]
+    bins, bands = len(t["pairs_by_bin"]), t["n_bands"]
+    rule = t["margins"].index(a["margin"]) if a.get("margin") in t["margins"] else None
+    cube = np.array(entry["cube"] if rule is None else entry["best"][rule]).reshape(len(t["floors"]), bins, bands)
+    mix = np.array(model.NATURAL_MIX if a["mix"] == "natural" else [1.0] * (bins - 1), float)
+    weights = np.r_[mix / mix.sum() * (1 - a["no_relative"]), a["no_relative"]]
+    per_pair = (cube * (weights / np.maximum(np.array(t["pairs_by_bin"], float), 1))[None, :, None]).sum(1)
+    ok = np.r_[False, X_EDGES[:-1] >= a["truth"], False]
+    true_hits = per_pair[:, 0]
+    good = per_pair[:, ok].sum(1)
+    wrong = per_pair[:, 1:][:, ~ok[1:]].sum(1) + np.array(entry["decoys"]) / max(t["pairs"], 1) * model.WRONG_FRAMES
+    correct = true_hits + good
+    return json.dumps({
+        "floors": t["floors"], "recall": (true_hits / max(1 - a["no_relative"], 1e-12)).tolist(),
+        "precision": (correct / np.maximum(correct + wrong, 1e-12)).tolist(), "others": (good + wrong).tolist(),
+        "pairs": t["pairs"], "index_share": t["index_share"], "salts": t["salts"], "from_level": t["from_level"],
+    })  # fmt: skip

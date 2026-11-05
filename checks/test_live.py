@@ -142,6 +142,37 @@ wide = json.loads(live.combo_simulate(request(k=4, combo_n=3, combo_lo=1, combo_
 print(f"wide window: {wide['sets']} sets, {wide['pairs']} pairs, index share {wide['index_share']:.3f}")
 assert wide["pairs"] < 4500 and wide["index_share"] < 1
 
+# Combination precision: with one k-mer per feature it is the same method as the precision panel.
+controls = {key: BASE[key] for key in ("margin", "truth", "mix", "no_relative")}
+for k, m in ((9, 8), (7, 8), (6, 32)):
+    r = request(k=k, m=m)
+    if not live.have(r):
+        live.compute(r)
+    q = json.loads(live.panel(r))
+    level = int(np.log2(m))
+    text = live.combo_precision(request(k=k, combo_n=1, combo_lo=0, combo_hi=0, level=level))
+    v = json.loads(live.combo_view(text, level, json.dumps(controls)))
+    recall_gap = np.abs(np.array(v["recall"]) - np.array(q["curve_recall"])).max()
+    wanted = np.array(q["curve_precision"]) > 0.005
+    precision_ratio = np.array(v["precision"])[wanted] / np.array(q["curve_precision"])[wanted]
+    common = np.array(q["curve_recall"]) > 0.05
+    gap = np.abs(np.log(np.array(v["precision"]))[common & wanted] - np.log(np.array(q["curve_precision"]))[common & wanted]).max()
+    print(f"k{k} m{m}: one k-mer per feature against the panel: recall gap {recall_gap:.3f}, precision log gap {gap:.3f}")
+    assert recall_gap < 0.03 and gap < 0.35  # 4 hash draws here, 8 there; widest at the highest floors
+
+# A share of the index, scaled up, against all of it.
+full = live.PRECISION_WORK
+small = request(k=4, combo_n=2, combo_lo=4, combo_hi=6, level=3)
+live.PRECISION_WORK = 1e12
+live.PRECISION_KEEP = 1e12
+whole = json.loads(live.combo_view(live.combo_precision(small), 3, json.dumps(controls)))
+live.PRECISION_WORK, live.PRECISION_KEEP = 3 * 11e6 / 4, 8e6
+part = json.loads(live.combo_view(live.combo_precision(small), 3, json.dumps(controls)))
+live.PRECISION_WORK = full
+gap = np.abs(np.log(np.array(part["precision"])[:6]) - np.log(np.array(whole["precision"])[:6])).max()
+print(f"index share {part['index_share']:.2f} against {whole['index_share']:.2f}: precision log gap {gap:.3f}")
+assert part["index_share"] < 1 and gap < 0.3
+
 # A stored result gives the same panel, without the sequences.
 r = request(k=9, m=16)
 text = live.compute(r)

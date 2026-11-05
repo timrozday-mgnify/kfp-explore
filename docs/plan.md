@@ -684,7 +684,22 @@ by the user.
 - **2026-11-05: combination k-mers simulated on demand.** The combination panel's simulated points now run in the browser at any k, window, read length and alphabet, on the bundled sets, cached like precision results (`live.combo_simulate`). The 24 precomputed configurations moved to `checks/data/sim-combo.json`, as a check only. Recall needs only each query's true group. Chance samples the index's features by hash level, on a share of its groups, and scales up. Very wide windows use fewer read pairs (at least enough to cover each identity bin), and the panel shows the counts. Nucleotide mode has no simulation.
   - **Against the native simulation,** on other queries (`checks/test_live.py`, 18 windows of up to 40 feature sets): recall RMSE 0.016, and chance within 0.99–1.10× where both have at least 50 matches. Chance still rests on few matches at k 5 pairs and above: 9 and 31 matches ran 1.5–1.7× high, and k 6 pairs and k 4 triples had none.
   - **Times in the browser pane, one run each:** 1.4 s for 4-mer pairs at window 4–6, 3.0 s for 3-mer pairs at 3–13 (34% of the index), 20.4 s for 3-mer triples at 3–13 (12%). The slowest setting tried natively, 1,770 feature sets, took 29 s there on 180 read pairs and 0.2% of the index, with too few matches to read chance.
-  - **Precision is not simulated:** it needs hits on all groups, which is the next step for testing whether pairs pay off under a score or multi-hit rule.
+  - **Precision (`live.combo_precision`).** Hits on every group, scored as kfp's keys: composition over the letters a feature fixes, less log2 of the groups holding it, with the charge per further hit counting every feature a read tries. One pass covers 6 sparsity levels upward. Where the index is too large, a share of its groups is held, true groups always among them, and other groups' hits are scaled up. The panel draws precision and recall per read pair by floor beside single k-mers with as many letters at about equal postings, at the precision panel's rule, truth level and identity mix.
+    - **Checks.** With one k-mer per feature it reproduces the precision panel's method independently: recall within 0.011–0.014 and precision within a log gap of 0.063–0.291 at settings checked, on 4 hash draws against 8, widest at the highest floors. A share of the index against all of it is checked in `checks/test_live.py`.
+    - **Under a score, near pairs about match single k-mers.** Uniform identity mix, correct at x ≥ 0.7, every group over the floor, recall / precision at 30, 40, 60 and 80 bits (postings within about 0.75–1.4× at power-of-two sparsity):
+
+      | Feature | 30 | 40 | 60 | 80 |
+      | --- | --- | --- | --- | --- |
+      | k 6, 1 in 8 | 0.77 / 0.50 | 0.70 / 0.68 | 0.58 / 0.88 | 0.48 / 0.96 |
+      | 3-mer pairs, 3–6, 1 in 32 | 0.74 / 0.57 | 0.66 / 0.76 | 0.51 / 0.92 | 0.38 / 0.96 |
+      | 3-mer pairs, 3–13, 1 in 64 | 0.74 / 0.60 | 0.66 / 0.79 | 0.51 / 0.93 | 0.38 / 0.97 |
+      | 3-mer pairs, 14–26, 1 in 128 | 0.50 / 0.83 | 0.35 / 0.94 | 0.15 / 0.97 | 0.05 / 0.98 |
+      | k 8, 1 in 8 | 0.77 / 0.49 | 0.70 / 0.57 | 0.62 / 0.77 | 0.55 / 0.87 |
+      | 4-mer pairs, 4–12, 1 in 64 | 0.75 / 0.53 | 0.68 / 0.66 | 0.59 / 0.84 | 0.51 / 0.93 |
+      | k 9, 1 in 4 | 0.84 / 0.34 | 0.77 / 0.45 | 0.74 / 0.57 | 0.70 / 0.66 |
+      | 3-mer triples, 3–13, 1 in 128 | 0.83 / 0.38 | 0.75 / 0.52 | 0.68 / 0.69 | 0.64 / 0.80 |
+
+      Reading across at equal recall, near windows gain up to about 0.04 precision on single k-mers at middling recall, about what the wider postings of some rows would buy, and far windows lose. Pair scores also take fewer steps across floors. This is one mini-slice, 4 hash draws and representatives, with reads in frame and no errors; the release has far more relatives per read.
 
 ## Licence
 

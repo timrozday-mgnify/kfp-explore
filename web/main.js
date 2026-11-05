@@ -243,6 +243,7 @@ function drawSnp(q, p) {
 let comboId = 0;
 let comboTimer = null;
 let comboDraw = null;
+let lastComboG = 1;
 
 function askCombo(p) {
   clearTimeout(comboTimer);
@@ -250,7 +251,7 @@ function askCombo(p) {
   const id = comboId;
   comboTimer = setTimeout(() => {
     ensureLiveWorker();
-    liveWorker.postMessage({ ...p, comboId: id });
+    liveWorker.postMessage({ ...p, g: lastComboG, comboId: id });
   }, 500);
 }
 
@@ -258,11 +259,41 @@ function onCombo(data) {
   if (data.comboId !== comboId) return;
   const status = el('c-sim-status');
   if (data.progress) status.textContent = 'Simulating these features on the bundled set…';
-  if (data.comboError) status.textContent = `Could not simulate: ${data.comboError}`;
+  if (data.comboError) { status.textContent = `Could not simulate: ${data.comboError}`; el('c-p-status').textContent = ''; }
   if (data.combo) {
     comboDraw = data.combo;
     drawComboPoints();
   }
+  if (data.precisionProgress) el('c-p-status').textContent = 'Simulating precision: hits on every group, up to about a minute the first time…';
+  if (data.view) { comboView = data.view; comboSingle = null; drawComboPrecision(); }
+  if (data.singleView) { comboSingle = { view: data.singleView, k: data.singleK, m: data.singleM }; drawComboPrecision(); }
+}
+
+let comboView = null;
+let comboSingle = null;
+
+function drawComboPrecision() {
+  const p = latest;
+  const v = comboView;
+  if (!v) return;
+  const label = (x) => (x === 0 ? 'no floor' : `${x} bits`);
+  const f = p.floor;
+  el('c-p-combo').textContent = `${v.precision[f].toFixed(3)} / ${v.recall[f].toFixed(3)}`;
+  el('c-p-single').textContent = comboSingle ? `${comboSingle.view.precision[f].toFixed(3)} / ${comboSingle.view.recall[f].toFixed(3)}` : '–';
+  const share = v.index_share < 1 ? `, ${(v.index_share * 100).toFixed(0)}% of the index with other groups scaled up` : '';
+  el('c-p-status').textContent = `Precision on ${v.pairs.toLocaleString()} read pairs${share}, ${v.salts} hash draws, at the precision panel's rule, truth level and identity mix. Kept in this browser.`;
+  const traces = [{ x: v.recall, y: v.precision, name: `${p.combo_n} × k ${p.k}, 1 in ${p.m}`, text: v.floors.map(label), mode: 'lines+markers', marker: { size: 5 }, line: { color: '#1e8449', width: 3 },
+    hovertemplate: '%{text}: recall %{x:.3f}, precision %{y:.3f}<extra></extra>' }];
+  if (comboSingle) {
+    const s = comboSingle.view;
+    traces.push({ x: s.recall, y: s.precision, name: `k ${comboSingle.k}, 1 in ${comboSingle.m} (same postings)`, text: s.floors.map(label), mode: 'lines+markers', marker: { size: 5 }, line: { color: '#c0392b' },
+      hovertemplate: '%{text}: recall %{x:.3f}, precision %{y:.3f}<extra></extra>' });
+  }
+  traces.push({ x: [v.recall[f]], y: [v.precision[f]], name: 'This floor', mode: 'markers', marker: { color: '#111', size: 10 } });
+  Plotly.react('plot-combo-pr', traces, {
+    ...LAYOUT, uirevision: 1, title: { text: 'Precision and recall per read pair, simulated', font: { size: 14 } },
+    xaxis: { ...AXIS, title: { text: 'Recall per read pair' }, range: [0, 1] }, yaxis: { ...AXIS, title: { text: 'Precision per read pair' }, range: [0, 1] },
+  }, CONFIG);
 }
 
 function drawComboPoints() {
@@ -339,17 +370,24 @@ function draw(r, p) {
   if (r.snp) drawSnp(r.snp, p);
   if (r.combo) {
     drawCombo(r.combo, p);
-    const key = [p.index, p.alphabet, p.k, p.combo_n, p.combo_lo, p.combo_hi, p.length, p.paired].join('|');
+    lastComboG = r.combo.g ?? 1;
+    const key = [p.index, p.alphabet, p.k, p.combo_n, p.combo_lo, p.combo_hi, p.length, p.paired, p.m, p.margin, p.truth, p.mix, p.no_relative].join('|');
     if (!r.combo.available || p.alphabet === 'dna') {
       el('c-sim-status').textContent = p.alphabet === 'dna' ? 'No simulation for nucleotide mode: the bundled sets have no nucleotide relatives.' : '';
       lastComboKey = '';
     } else if (key !== lastComboKey) {
       lastComboKey = key;
       comboDraw = null;
-      for (const id of ['c-sim-recall', 'c-sim-ratio', 'c-sim-chance']) el(id).textContent = '–';
+      comboView = null;
+      comboSingle = null;
+      for (const id of ['c-sim-recall', 'c-sim-ratio', 'c-sim-chance', 'c-p-combo', 'c-p-single']) el(id).textContent = '–';
+      el('c-p-status').textContent = '';
       el('c-sim-status').textContent = 'Simulating shortly…';
       askCombo(p);
-    } else if (comboDraw) drawComboPoints();
+    } else {
+      if (comboDraw) drawComboPoints();
+      drawComboPrecision();
+    }
   }
   el('recall').textContent = r.recall.toFixed(3);
   el('index').textContent = size(r.index_gb);
