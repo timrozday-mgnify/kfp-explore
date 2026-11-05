@@ -23,6 +23,8 @@
   #benchmark-plots, #policy-plots { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 8px; }
   #benchmark-plots > div { height: 420px; }
   #policy-plots > div { height: 500px; }
+  #snp-plots { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 8px; }
+  #snp-plots > div { height: 360px; }
   .readouts { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; margin: 8px 0; }
   .readouts b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
   p.note { color: #666; max-width: 70em; }
@@ -150,6 +152,32 @@ Reduced alphabets raise identity by the share of substitutions staying within a 
 scaled 1.6× to fit simulated reads on three alphabets), and lower chance by class frequencies. Nucleotide mode reads identity as nucleotide identity, assumes 3
 letters per residue and uniform bases, and uses conservation fitted on protein with no codon
 structure, so treat it as a rough guide.</p>
+<h2>SNPs in inconvenient places</h2>
+<form id="snp-form">
+  <label>Keys on the read
+    <select id="placement">
+      <option value="sampled">Hash sampled, 1 in m</option>
+      <option value="even">Evenly spaced, every m</option>
+      <option value="minimizer">Window minimizers, over m</option>
+    </select>
+  </label>
+  <label>Placement drawn <span id="draw-out"></span><input type="range" id="draw" min="0" max="20" step="1" value="1"></label>
+  <label>Substitutions on the read, d <span id="d-out"></span><input type="range" id="d" min="0" max="60" step="1" value="3"></label>
+  <label>SNP rate, per base <span id="snp-out"></span><input type="range" id="snp" min="-4" max="-1" step="0.1" value="-2"></label>
+  <label>Read error rate, per base <span id="error-out"></span><input type="range" id="error" min="-4" max="-1" step="0.1" value="-3"></label>
+</form>
+<div class="readouts">
+  <div>Keys on this read<b id="s-keys">–</b></div>
+  <div>Fewest substitutions to remove them all<b id="s-fewest">–</b></div>
+  <div>P(d remove them all), this placement<b id="s-at-d">–</b></div>
+  <div>P(d remove them all), any placement<b id="s-mean-at-d">–</b></div>
+  <div>P(read holds no whole key)<b id="s-no-key">–</b></div>
+  <div>Letter identity from SNPs and errors<b id="s-identity">–</b></div>
+  <div>Anchor recall, uniform changes<b id="s-uniform">–</b></div>
+  <div>Anchor recall, conserved blocks (model)<b id="s-chain">–</b></div>
+</div>
+<div id="snp-plots"><div id="plot-snp-keys"></div><div id="plot-snp-curve"></div></div>
+<p class="note">Uses k, sparsity, read length and pairing from the top of the page. A substitution removes every key overlapping it. The fewest that remove all keys are shown in red, and are the worst case at that number. For protein, a base change reaches a residue at about 3 × the rate per base, × 0.75 non-synonymous, less substitutions staying within a class on a reduced alphabet; nucleotide mode uses the rate per base. Uniform changes place them at random across the read, while the model's conserved blocks and rate per read concentrate them, and include kfp's 0.96 ceiling, so the two differ at the same identity. A pair's mates are drawn separately, and the chance of no key takes them as independent; minimizers take gaps as uniform.</p>
 <h2>Grouping and key policy</h2>
 <form id="policy-form">
   <label>Compare

@@ -317,7 +317,7 @@ Phases 1–3 are the plan. The rest is a backlog, reordered as questions come up
 - Readouts: index size at a chosen database size, and chance anchors per read.
 - *Done when:* the check's tolerances hold, and slider moves redraw with no visible lag in a browser.
 
-Phases 1–3 and 3b are built, phase 3c is partly done, phase 4 is mostly done, phase 6 has tables and a panel, and precision is computed on demand at k 1–31 (below). Phases 5 and 7–9 have not started.
+Phases 1–3 and 3b are built, phase 3c is partly done, phase 4 is mostly done, phase 6 has tables and a panel, precision is computed on demand at k 1–31, and phase 7 is built (below). Phases 5, 8 and 9 have not started.
 
 **Phase 2: analyse a small set in the browser.**
 
@@ -654,6 +654,11 @@ by the user.
   - **"No floor" now means any hit.** It was a score of at least 0, which dropped multi-hit reads on keys with no bits, so recall at k 1–3 read near 0. This changes results only where key bits fall below the charge.
   - **Times in the browser pane, while the pane was hidden, one run each:** k 1, 9.8 s; k 3, 7.7 s; k 4, 12.7 s; dayhoff k 5, 5.5 s; k 14, 26 s; k 20, 30.5 s. High k is the slowest, and probably sorting mostly distinct k-mers is why, but that has not been profiled. Wasm heap was not re-measured with these changes.
   - **Limits.** At k 1–3 precision reads 0.000, and with 10–80 read pairs it is noise beyond that: nearly every group is hit. At high k with sparse sampling, few hits survive. Nucleotide mode is still unavailable.
+
+- **2026-11-05: phase 7, SNP and overlap panel.** New panel: key placement on a read (hash sampled, evenly spaced or window minimizers, at the page's k, m, read length and pairing), drawn with the fewest substitutions that remove every key, the chance d uniformly placed substitutions do so, for that placement and averaged over 32, and the chance a read holds no whole key. SNP and read error rates give a letter identity, and anchor recall both under uniform changes and from the model's chain.
+  - **Method.** The fewest substitutions are a greedy hitting set over key intervals, optimal on a line. The removal curve counts sets of positions exactly, by a recurrence left to right, in `model.removal_curve`. A read's chance of no key follows from spacing: (1 − 1/m)^W sampled, max(1 − W/m, 0) evenly spaced, and (m − W)(m − W + 1) / (m(m + 1)) for minimizers with gaps taken as uniform, W being the read's windows.
+  - **Checks (`checks/test_snp.py`).** Hitting set and curve match every position set on 200 random small reads, within 10⁻⁹. No-key chance is within 0.03 of simulated reads on 8 settings (the largest gap 0.017). Recall under uniform changes is within 0.02 of simulation.
+  - **Limits.** Positions are read letters; a substitution is taken to break exactly the keys overlapping it, so a change that happens to create another key is ignored. The 0.75 non-synonymous share and 3× per codon are the plan's approximations, not measured. Uniform changes and the chain differ at the same identity by design; the chain's conservation is the calibrated one. Minimizers here rank k-mers at random, where kfp ranks by rarity.
 
 ## Licence
 

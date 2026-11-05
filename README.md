@@ -20,6 +20,7 @@ uv run --no-project --with numpy python checks/test_tables.py  # precision table
 uv run --no-project --with numpy python checks/test_benchmark.py  # kfp benchmark table against kfp's gate
 uv run --no-project --with numpy python checks/test_policy.py  # grouping and key policy against kfp's comparisons
 uv run --no-project --with numpy python checks/test_live.py  # on-demand precision against the tables
+uv run --no-project --with numpy python checks/test_snp.py  # SNP panel against brute force and simulation
 uv run --no-project --with numpy python measure/fit_rate.py web/data/sim-grid.json web/data/sim-grid-slice.json  # fit the read rate on each set
 ```
 

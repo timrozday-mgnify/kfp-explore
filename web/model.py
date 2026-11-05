@@ -390,4 +390,116 @@ def compute(params_json):
         "index_gb": n_postings * BYTES_PER_POSTING / 1e9,
         "chance": base,
         "chance_corrected": corrected,
+        "snp": snp_panel(a, within) if "placement" in a else None,
     })
+
+
+# SNPs in inconvenient places: where keys fall on a read, and what it takes to remove them all.
+NON_SYNONYMOUS = 0.75  # ~ share of a codon's single-base changes that change the residue
+MEAN_DRAWS = 32
+MAX_D = 200
+
+
+def residue_rate(snp, error, alphabet, within):
+    """A letter's chance of differing from the indexed sequence, from a per-base SNP and error rate."""
+    base = 1 - (1 - snp) * (1 - error)
+    if alphabet == "dna":
+        return base
+    return (1 - (1 - base) ** 3) * NON_SYNONYMOUS * (1 - within)
+
+
+def key_starts(length, k, m, placement, rng):
+    """Where keys start on a read of ``length``: hash sampled at 1 in m (``sampled``), every m
+    windows from a random offset (``even``), or window minimizers over m windows (``minimizer``)."""
+    n = length - k + 1
+    if n <= 0:
+        return np.empty(0, int)
+    if placement == "even":
+        return np.arange(int(rng.integers(0, m)), n, m)
+    if placement == "minimizer":
+        pad = m - 1  # windows reaching before the read pick from k-mers the read does not hold
+        ranks = rng.random(n + 2 * pad)
+        picks = {i + int(np.argmin(ranks[i : i + m])) for i in range(n + pad)}
+        return np.array(sorted(p - pad for p in picks if pad <= p < n + pad), int)
+    return np.flatnonzero(rng.random(n) < 1 / m)
+
+
+def read_keys(length, k, m, placement, paired, rng):
+    """Key intervals (first, last residue) on the read, a pair's second mate after the first's."""
+    starts = key_starts(length, k, m, placement, rng)
+    if paired:
+        starts = np.r_[starts, length + key_starts(length, k, m, placement, rng)]
+    return starts, starts + k - 1
+
+
+def fewest_to_remove(first, last):
+    """A smallest set of positions touching every interval: the end of each interval not yet touched,
+    by increasing end, which is optimal for intervals on a line."""
+    hits = []
+    for i in np.argsort(last):
+        if not hits or first[i] > hits[-1]:
+            hits.append(int(last[i]))
+    return hits
+
+
+def removal_curve(first, last, n, d_max):
+    """P(d distinct uniformly placed substitutions remove every key), for d = 0 to d_max. Counts sets
+    of positions, left to right: the next position must come before any key wholly beyond this one."""
+    order = np.argsort(first)
+    a, b = first[order], last[order]
+    soonest = np.minimum.accumulate(b[::-1])[::-1] if len(b) else b  # least end among keys from here
+    from_each = np.searchsorted(a, np.arange(-1, n), side="right")  # keys starting after position p
+    reach = np.r_[soonest, n][from_each] + 1  # last allowed next position, shifted by 1 like f
+    lowest = np.searchsorted(reach, np.arange(n + 2), side="left")  # earliest p that can jump to each q
+    ways = np.zeros(n + 2)
+    ways[0] = 1.0
+    out, choose = [], 1.0
+    for d in range(d_max + 1):
+        total = np.r_[0.0, np.cumsum(ways)]
+        out.append(float((total[n + 1] - total[lowest[n + 1]]) / choose))
+        next_ways = total[np.arange(n + 2)] - total[np.minimum(lowest, np.arange(n + 2))]
+        next_ways[0] = next_ways[n + 1] = 0
+        ways = next_ways
+        choose *= (n - d) / (d + 1) if d < n else 1.0
+    return np.array(out)
+
+
+def no_key_chance(length, k, m, placement, paired):
+    """P(a read holds no whole key), from key spacing alone; a pair's mates taken as independent."""
+    n = max(length - k + 1, 0)
+    if placement == "even":
+        one = max(1 - n / m, 0.0)
+    elif placement == "minimizer":  # gaps between picks taken as uniform on 1 to m
+        one = (m - n) * (m - n + 1) / (m * (m + 1)) if n < m else 0.0
+    else:
+        one = (1 - 1 / m) ** n
+    return one**2 if paired else one
+
+
+def snp_panel(a, within):
+    """The SNP and overlap panel, for one placement and on average over placements."""
+    length, k, m, paired, placement = a["length"], a["k"], a["m"], a["paired"], a["placement"]
+    n = length * (2 if paired else 1)
+    first, last = read_keys(length, k, m, placement, paired, np.random.default_rng(a["draw"]))
+    hits = fewest_to_remove(first, last)
+    d_max = int(min(n, MAX_D, max(a["d"], 3 * len(hits), 30)))
+    curve = removal_curve(first, last, n, d_max)
+    mean = np.mean([
+        removal_curve(*read_keys(length, k, m, placement, paired, np.random.default_rng(10_000 + i)), n, d_max)
+        for i in range(MEAN_DRAWS)
+    ], axis=0)  # fmt: skip
+    rate = residue_rate(a["snp"], a["error"], a["alphabet"], within)
+    ds = np.arange(d_max + 1)
+    log_choose = np.cumsum(np.r_[0.0, np.log((n - ds[:-1]) / (ds[:-1] + 1))])
+    tail = np.exp(log_choose + ds * np.log(max(rate, 1e-300)) + (n - ds) * np.log1p(-min(rate, 1 - 1e-12)))
+    weights = np.r_[tail, max(1 - tail.sum(), 0.0)]
+    survive = 1 - float((weights * np.r_[mean, mean[-1]]).sum())
+    identity = 1 - rate
+    chain = float(recall(length, k, m, identity, paired=paired, within=0.0))
+    return {
+        "length": length, "n": n, "paired": paired, "first": first.tolist(), "last": last.tolist(), "hits": hits,
+        "ds": ds.tolist(), "curve": curve.tolist(), "mean": mean.tolist(), "d": a["d"],
+        "at_d": float(curve[min(a["d"], d_max)]), "mean_at_d": float(mean[min(a["d"], d_max)]),
+        "no_key": no_key_chance(length, k, m, placement, paired), "rate": rate, "identity": identity,
+        "recall_chain": chain, "recall_uniform": survive,
+    }  # fmt: skip

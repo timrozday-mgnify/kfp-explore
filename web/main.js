@@ -1,6 +1,6 @@
 // @ts-check
 /* global Plotly */
-const IDS = ['alphabet', 'k', 'm', 'length', 'identity', 'proteins', 'rep_share', 'index-set', 'floor', 'margin', 'truth', 'mix', 'no_relative', 'coverage', 'targets', 'b-level', 'b-at', 'pol-family', 'pol-rule', 'pol-truth']; // alphabet first: it sets k's range
+const IDS = ['alphabet', 'k', 'm', 'length', 'identity', 'proteins', 'rep_share', 'index-set', 'floor', 'margin', 'truth', 'mix', 'no_relative', 'coverage', 'targets', 'placement', 'draw', 'd', 'snp', 'error', 'b-level', 'b-at', 'pol-family', 'pol-rule', 'pol-truth']; // alphabet first: it sets k's range
 const el = (id) => /** @type {HTMLInputElement} */ (document.getElementById(id));
 
 const compact = (x) => (x >= 1e4 || (x > 0 && x < 0.01) ? x.toExponential(1).replace('e+', 'e') : x >= 100 ? x.toFixed(0) : x.toPrecision(2));
@@ -23,6 +23,11 @@ function params() {
     mix: el('mix').value,
     no_relative: +el('no_relative').value,
     coverage: +el('coverage').value,
+    placement: el('placement').value,
+    draw: +el('draw').value,
+    d: +el('d').value,
+    snp: 10 ** +el('snp').value,
+    error: 10 ** +el('error').value,
     targets: Math.round(10 ** +el('targets').value),
   };
 }
@@ -38,6 +43,10 @@ function showInputs(p) {
   el('floor-out').textContent = floor === 0 ? 'none' : `${floor} bits`;
   el('no_relative-out').textContent = p.no_relative.toFixed(2);
   el('targets-out').textContent = p.targets.toExponential(1).replace('e+', 'e');
+  el('draw-out').textContent = String(p.draw);
+  el('d-out').textContent = String(p.d);
+  el('snp-out').textContent = p.snp.toExponential(1).replace('e+', 'e');
+  el('error-out').textContent = p.error.toExponential(1).replace('e+', 'e');
 }
 
 const AXIS = { zeroline: false, automargin: true };
@@ -185,7 +194,43 @@ function drawPrecision(q, p, fromLive = false) {
   }, CONFIG);
 }
 
+function drawSnp(q, p) {
+  el('s-keys').textContent = String(q.first.length);
+  el('s-fewest').textContent = String(q.hits.length);
+  el('s-at-d').textContent = q.at_d.toFixed(3);
+  el('s-mean-at-d').textContent = q.mean_at_d.toFixed(3);
+  el('s-no-key').textContent = q.no_key.toFixed(3);
+  el('s-identity').textContent = q.identity.toFixed(4);
+  el('s-uniform').textContent = q.recall_uniform.toFixed(3);
+  el('s-chain').textContent = q.recall_chain.toFixed(3);
+  const lanes = 6;
+  const xs = q.first.flatMap((a, i) => [a, q.last[i] + 1, null]);
+  const ys = q.first.flatMap((_, i) => [i % lanes, i % lanes, null]);
+  const top = lanes - 0.5;
+  const traces = [
+    { x: xs, y: ys, name: 'Keys', mode: 'lines', line: { color: '#2c6fbb', width: 7 }, hoverinfo: 'skip' },
+    { x: q.hits.map((h) => h + 0.5), y: q.hits.map(() => top), name: 'Fewest substitutions', mode: 'markers', marker: { color: '#c0392b', size: 10, symbol: 'triangle-down' }, hovertemplate: 'position %{x}<extra></extra>' },
+  ];
+  const shapes = [
+    ...q.hits.map((h) => ({ type: 'line', x0: h + 0.5, x1: h + 0.5, y0: -0.5, y1: top, line: { color: '#c0392b', width: 1 } })),
+    ...(q.paired ? [{ type: 'line', x0: q.length, x1: q.length, y0: -0.5, y1: top, line: { color: '#666', width: 1, dash: 'dot' } }] : []),
+  ];
+  Plotly.react('plot-snp-keys', traces, {
+    ...LAYOUT, shapes, title: { text: `Keys on the read (k ${p.k}, 1 in ${p.m}${q.paired ? ', dotted line between mates' : ''})`, font: { size: 14 } },
+    xaxis: { ...AXIS, title: { text: 'Position on the read' }, range: [0, q.n] }, yaxis: { ...AXIS, showticklabels: false, range: [-0.8, lanes], title: { text: '' } },
+  }, CONFIG);
+  Plotly.react('plot-snp-curve', [
+    { x: q.ds, y: q.curve, name: 'This placement', mode: 'lines', line: { color: '#2c6fbb' } },
+    { x: q.ds, y: q.mean, name: 'Any placement', mode: 'lines', line: { color: '#666', dash: 'dash' } },
+    { x: [Math.min(q.d, q.ds.length - 1)], y: [q.at_d], name: 'd', mode: 'markers', marker: { color: '#c0392b', size: 10 } },
+  ], {
+    ...LAYOUT, title: { text: 'Chance d substitutions remove every key', font: { size: 14 } },
+    xaxis: { ...AXIS, title: { text: 'Substitutions on the read, d' } }, yaxis: { ...AXIS, title: { text: 'Probability' }, range: [0, 1.02] },
+  }, CONFIG);
+}
+
 function draw(r, p) {
+  if (r.snp) drawSnp(r.snp, p);
   el('recall').textContent = r.recall.toFixed(3);
   el('index').textContent = size(r.index_gb);
   el('postings').textContent = r.postings.toExponential(1).replace('e+', 'e');
@@ -263,6 +308,7 @@ function update() {
 
 el('controls').addEventListener('input', update);
 el('precision-form').addEventListener('input', update);
+el('snp-form').addEventListener('input', update);
 update();
 
 for (const [alphabet, file] of Object.entries(GRID_FILES)) {
