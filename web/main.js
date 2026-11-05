@@ -1,6 +1,6 @@
 // @ts-check
 /* global Plotly */
-const IDS = ['alphabet', 'k', 'm', 'length', 'identity', 'proteins', 'rep_share', 'index-set', 'floor', 'margin', 'truth', 'mix', 'no_relative', 'reads', 'targets']; // alphabet first: it sets k's range
+const IDS = ['alphabet', 'k', 'm', 'length', 'identity', 'proteins', 'rep_share', 'index-set', 'floor', 'margin', 'truth', 'mix', 'no_relative', 'reads', 'targets', 'b-level', 'b-at']; // alphabet first: it sets k's range
 const el = (id) => /** @type {HTMLInputElement} */ (document.getElementById(id));
 
 const compact = (x) => (x >= 1e4 || (x > 0 && x < 0.01) ? x.toExponential(1).replace('e+', 'e') : x >= 100 ? x.toFixed(0) : x.toPrecision(2));
@@ -216,6 +216,82 @@ fetch('data/sim-grid.json').then((r) => (r.ok ? r.json() : null)).then((g) => {
     + `k ${[...new Set(g.rows.map((x) => x.k))].join(', ')}, 1 in 1–${Math.max(...g.rows.map((x) => x.m))}. `
     + 'The model keeps kfp\'s recall ceiling of 0.96, which comes from representatives of larger groups. '
     + 'Also simulated, at fewer settings: murphy10, dayhoff and seb8.';
+}).catch(() => {});
+
+// kfp's real indexes, from the benchmark table
+const METHODS = { 'flat tier 1': '#c0392b', 'tree tier 1': '#2c6fbb', 'tree tier 2': '#1e8449' };
+const TIER_DASH = { slim: 'dot', standard: 'dash', large: 'solid' };
+let benchmark = null;
+
+function drawBenchmark() {
+  if (!benchmark) return;
+  const level = el('b-level').value;
+  const at = el('b-at').value;
+  const levelName = el('b-level').selectedOptions[0].textContent;
+  const runs = Object.entries(benchmark.runs);
+  const recallOf = (run) => {
+    if (at === 'whole') return run.whole[level][0];
+    const i = Math.ceil(benchmark.runs[at].whole[level][1] / benchmark.precision_step - 1e-9);
+    return run.at_precision[level][i] ?? 0; // the next grid value up, so never above the true recall
+  };
+  const atLabel = at === 'whole' ? 'whole hit list' : `at ${at}'s precision`;
+  Plotly.react('plot-b-size', Object.entries(METHODS).map(([method, color]) => {
+    const rows = runs.filter(([, r]) => r.method === method);
+    return {
+      x: rows.map(([, r]) => r.index_gb), y: rows.map(([, r]) => recallOf(r)), text: rows.map(([, r]) => r.tier),
+      name: method, mode: 'lines+markers', line: { color }, marker: { size: 9 },
+      hovertemplate: `${method}, %{text}: %{x:.2f} GB, recall %{y:.3f}<extra></extra>`,
+    };
+  }), {
+    ...LAYOUT,
+    title: { text: `Recall by index size (${atLabel})`, font: { size: 14 } },
+    xaxis: { ...AXIS, type: 'log', title: { text: 'Index size, GB (1-in-100 subset)' } },
+    yaxis: { ...AXIS, title: { text: `Recall, ${levelName}` }, rangemode: 'tozero' },
+  }, CONFIG);
+  const line = (name, r) => ({ name, mode: 'lines', line: { color: METHODS[r.method], dash: TIER_DASH[r.tier], width: 1.8 } });
+  Plotly.react('plot-b-pr', runs.map(([name, r]) => {
+    const keep = r.at_precision[level].map((x, i) => [x, i * benchmark.precision_step]).filter(([x]) => x > 0);
+    return { ...line(name, r), x: keep.map((x) => x[0]), y: keep.map((x) => x[1]), hovertemplate: `${name}: recall %{x:.3f}, precision %{y:.3f}<extra></extra>` };
+  }), {
+    ...LAYOUT,
+    title: { text: 'Best recall at each precision', font: { size: 14 } },
+    xaxis: { ...AXIS, title: { text: `Recall, ${levelName}` }, rangemode: 'tozero' },
+    yaxis: { ...AXIS, title: { text: 'Precision' }, range: [0, 1] },
+  }, CONFIG);
+  const idLevel = benchmark.runs['flat-slim'].by_identity[level] ? level : '0.8';
+  Plotly.react('plot-b-identity', runs.map(([name, r]) => ({
+    ...line(name, r), x: r.identity_bins, y: r.by_identity[idLevel], hovertemplate: `${name}: strains at %{x}, recall %{y:.3f}<extra></extra>`,
+  })), {
+    ...LAYOUT,
+    title: { text: `Recall at ≥ ${+idLevel * 100}% match, by strain identity`, font: { size: 14 } },
+    xaxis: { ...AXIS, title: { text: "Strain's identity to its source" }, autorange: 'reversed' },
+    yaxis: { ...AXIS, title: { text: 'Recall' }, range: [0, 1] },
+  }, CONFIG);
+  Plotly.react('plot-b-tail', Object.entries(benchmark.tail_per_pair).map(([tier, ys]) => {
+    const keep = ys.map((y, i) => [benchmark.tail_bits[i], y]).filter((x) => x[1] > 0);
+    return {
+      name: tier, mode: 'lines+markers', marker: { size: 4 }, x: keep.map((x) => x[0]), y: keep.map((x) => x[1]),
+      line: { color: METHODS['tree tier 1'], dash: TIER_DASH[tier] }, hovertemplate: `${tier}: %{x} bits, %{y:.2g} per read pair<extra></extra>`,
+    };
+  }), {
+    ...LAYOUT,
+    title: { text: 'Decoy leaves over a score bar (tree tier 1)', font: { size: 14 } },
+    xaxis: { ...AXIS, title: { text: 'Score bar, bits' } },
+    yaxis: { ...AXIS, type: 'log', title: { text: 'Decoy leaves per read pair' } },
+  }, CONFIG);
+}
+
+el('benchmark-form').addEventListener('input', () => { drawBenchmark(); update(); });
+fetch('data/kfp-benchmark.json').then((r) => (r.ok ? r.json() : null)).then((b) => {
+  if (!b) return;
+  benchmark = b;
+  drawBenchmark();
+  el('benchmark-note').textContent = `Real indexes, not the model: ${b.source}, ${b.strains.toLocaleString()} `
+    + `strains at 100–70% identity and ${b.read_pairs.toLocaleString()} read pairs, with no background reads, so `
+    + 'precision only counts near relatives. A reported unit is correct if its best member reaches the identity, which favours flat '
+    + 'tiers at ≥ 99%. Recall has about ±0.01 of noise. The ranking is by abundance. '
+    + `Tree index size fits ${b.size_fit.fixed_gb.toFixed(1)} GB plus ${b.size_fit.bytes_per_posting.toFixed(0)} bytes per posting. `
+    + 'Tree decoys are leaves, so a key shared by a node counts once per leaf; decoys above about 80 bits rest on few counts.';
 }).catch(() => {});
 
 // Analysis of a protein set

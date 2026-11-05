@@ -18,7 +18,7 @@ tables in kfp's `docs/tree-index-plan.md`.
 | The same with independent mutations | RMSE 0.081, much too steep at low identity | Not usable |
 | Chance anchors per read pair | Composition alone is 1.2–1.5× under at k 6–8 and 3.5–3.8× under at k 9 | Yes, with a measured correction |
 | Index size | Representative residues / m is within ~20% of the kfp table | Yes |
-| Noise floor tail (chance against score bar) | Independent hits fall ~1,000× per 10 bits. Decoys fall 10–12× | **No: fit it to decoys** |
+| Noise floor tail (chance against score bar) | Independent hits fall ~1,000× per 10 bits. Decoys fall 10–12× (2.5–5× on real tiers at 40–70 bits; progress log, 2026-11-05) | **No: fit it to decoys** |
 | Precision among homologues | Measured shared k-mer counts predict it at any sparsity and hit threshold, on average over hashes. Best-group assignment and growth to massive indexes are not yet predicted | **Yes per index, from a small measured table; see below** |
 | Analysing a small set in the browser | 44 k proteins: k-mers and spectrum in under 1 s | Yes, up to about 20 M residues |
 | Extrapolating a small set to MGnify | 7× to 2,700× too low | **No: needs a measured scale profile** |
@@ -600,6 +600,14 @@ by the user.
   - **Low floors:** floors below a key's bits change nothing. At k 9 floors up to 30 are identical (5–95% of keys
     hold 34–41 bits). They matter at k 5 (20 bits: precision at x ≥ 0.7 rises from 0.08 to 0.52, recall 0.98
     to 0.96) and slightly at k 6. Floors under about 15 bits would need k 4 or below, which has no table.
+
+- **2026-11-05: kfp's real indexes on the page.** `measure/benchmark_summary.py` reduces kfp's `tree-index-benchmark` run (1-in-100 subset, 2,000 strains, 9,191 read pairs, no background) to
+  `web/data/kfp-benchmark.json` (83 KB). A new panel plots recall by index size, recall at each precision, recall by strain identity and the decoy tail, for three flat tiers and three tree tiers. These are measurements, not the model. `checks/test_benchmark.py` passes: 36 gate rows lie within the table's precision grid (widest bracket 0.004 recall), and the size fit is within 6% on each tier.
+  - **Index size.** Tree tiers fit 1.9 GB plus 19.6 bytes per posting, which supports the plan's 19–20 B and adds a fixed term the page's index size lacks. The page still uses 6 B (the anchor design), with no fixed term. The composition of the fixed term is unread: the indexes are not in the results.
+  - **Chance grows linearly in postings, at real keys.** Decoy leaves per pair at ≥ 30 bits, less slim's, are 1.10 (standard) and 5.81 (large), a ratio of 5.3 for 5.4× the k 8 layer's postings. The slice's k 8 table at m 8, scaled by postings and 3 frames, predicts 2.5 and 13.7: **2.3× high on both**, plausibly because these keys are the rarest per window and the table's are hash-sampled; not tested. Groups count once there and leaves here, which should push the other way.
+  - **The tail is heavier than this plan's estimate.** Decoys fall 2.5–5× per 10 bits from 40 to 70 bits (slim 360 to 3 leaves, large 1,764 to 115), against the 10–12× in the Verdict and "~10× per 10 bits" under Noise floor. The steps are not geometric: 7–32× from 30 to 40 bits, probably where single k 8 and k 7 hits end. Counts above 80 bits are 20 leaves or fewer.
+  - **Sticky leaves are not visible at this read count.** Among aligned decoys, the top 1% of leaves hold 5% of (leaf, read) rows, on 56,000–197,000 rows, and at most 26 for one leaf. That does not support stickiness as the cause of the k 5 gap in the last entry, but 9,191 read pairs is small and this only sees decoys that reached alignment. The k 5 gap itself is untested here: no tier uses k 5, and the k 8 tables are 1–7× high at 40 bits, on few counts.
+  - **Not usable from this run:** per-(k, m) tails, since layers are pooled; retention by policy and radius, since keys and indexes are not in the results; anything about growth, with one index size; precision against background.
 
 ## Licence
 

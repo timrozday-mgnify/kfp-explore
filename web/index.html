@@ -20,6 +20,8 @@
   #precision-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px 24px; }
   #precision-plots { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 8px; }
   #precision-plots > div { height: 360px; }
+  #benchmark-plots { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 8px; }
+  #benchmark-plots > div { height: 420px; }
   .readouts { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; margin: 8px 0; }
   .readouts b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
   p.note { color: #666; max-width: 70em; }
@@ -140,6 +142,29 @@ Reduced alphabets raise identity by the share of substitutions staying within a 
 scaled 1.6× to fit simulated reads on three alphabets), and lower chance by class frequencies. Nucleotide mode reads identity as nucleotide identity, assumes 3
 letters per residue and uniform bases, and uses conservation fitted on protein with no codon
 structure, so treat it as a rough guide.</p>
+<h2>Measured: kfp's indexes</h2>
+<form id="benchmark-form">
+  <label>Read-out
+    <select id="b-level">
+      <option value="0.8">Nearest match ≥ 80%</option>
+      <option value="0.9">Nearest match ≥ 90%</option>
+      <option value="0.95">Nearest match ≥ 95%</option>
+      <option value="0.99">Nearest match ≥ 99%</option>
+      <option value="mgnify90">MGnify90 unit</option>
+      <option value="pfam">Pfam family</option>
+    </select>
+  </label>
+  <label>Recall taken
+    <select id="b-at">
+      <option value="whole">Over the whole hit list</option>
+      <option value="flat-slim">At flat slim's precision</option>
+      <option value="flat-standard">At flat standard's precision</option>
+      <option value="flat-large">At flat large's precision</option>
+    </select>
+  </label>
+</form>
+<div id="benchmark-plots"><div id="plot-b-size"></div><div id="plot-b-pr"></div><div id="plot-b-identity"></div><div id="plot-b-tail"></div></div>
+<p class="note" id="benchmark-note"></p>
 <h2>Analyse a protein set</h2>
 <form id="analysis-controls">
   <label>Set
