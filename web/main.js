@@ -1,6 +1,6 @@
 // @ts-check
 /* global Plotly */
-const IDS = ['alphabet', 'k', 'm', 'length', 'identity', 'proteins', 'rep_share', 'index-set', 'floor', 'margin', 'truth', 'mix', 'no_relative', 'coverage', 'targets', 'placement', 'draw', 'd', 'snp', 'error', 'b-level', 'b-at', 'pol-family', 'pol-rule', 'pol-truth']; // alphabet first: it sets k's range
+const IDS = ['alphabet', 'k', 'm', 'length', 'identity', 'proteins', 'rep_share', 'index-set', 'floor', 'margin', 'truth', 'mix', 'no_relative', 'coverage', 'targets', 'combo_n', 'combo_lo', 'combo_hi', 'placement', 'draw', 'd', 'snp', 'error', 'b-level', 'b-at', 'pol-family', 'pol-rule', 'pol-truth']; // alphabet first: it sets k's range
 const el = (id) => /** @type {HTMLInputElement} */ (document.getElementById(id));
 
 const compact = (x) => (x >= 1e4 || (x > 0 && x < 0.01) ? x.toExponential(1).replace('e+', 'e') : x >= 100 ? x.toFixed(0) : x.toPrecision(2));
@@ -23,6 +23,9 @@ function params() {
     mix: el('mix').value,
     no_relative: +el('no_relative').value,
     coverage: +el('coverage').value,
+    combo_n: +el('combo_n').value,
+    combo_lo: +el('combo_lo').value,
+    combo_hi: +el('combo_hi').value,
     placement: el('placement').value,
     draw: +el('draw').value,
     d: +el('d').value,
@@ -44,6 +47,8 @@ function showInputs(p) {
   el('no_relative-out').textContent = p.no_relative.toFixed(2);
   el('targets-out').textContent = p.targets.toExponential(1).replace('e+', 'e');
   el('draw-out').textContent = String(p.draw);
+  el('combo_lo-out').textContent = String(p.combo_lo);
+  el('combo_hi-out').textContent = String(p.combo_hi);
   el('d-out').textContent = String(p.d);
   el('snp-out').textContent = p.snp.toExponential(1).replace('e+', 'e');
   el('error-out').textContent = p.error.toExponential(1).replace('e+', 'e');
@@ -229,8 +234,71 @@ function drawSnp(q, p) {
   }, CONFIG);
 }
 
+let comboGrid = null;
+fetch('data/sim-combo.json').then((r) => (r.ok ? r.json() : null)).then((g) => { comboGrid = g; }).catch(() => {});
+
+function drawCombo(q, p) {
+  const off = el('combo-unavailable');
+  off.hidden = q.available;
+  el('combo-results').hidden = !q.available;
+  if (!q.available) {
+    off.textContent = q.reason === 'window'
+      ? 'No features: the upper bound must reach the lower bound × (k-mers per feature − 1).'
+      : 'The reads are too short for these k-mers at the lower bound.';
+    return;
+  }
+  el('c-g').textContent = String(q.g);
+  el('c-bits').textContent = q.bits.toFixed(1);
+  el('c-recall').textContent = q.combo[q.at].toFixed(3);
+  el('c-equal').textContent = q.single_equal[q.at].toFixed(3);
+  el('c-postings').textContent = q.postings_combo.toExponential(1).replace('e+', 'e');
+  el('c-chance').textContent = `≥ ${compact(q.chance)}`;
+  el('c-chance-single').textContent = `≥ ${compact(q.chance_single)}`;
+  const equal = q.equal_m >= 1 ? `1 in ${q.equal_m.toFixed(1)}` : '1 in 1';
+  const lines = [
+    { x: q.identity, y: q.combo, name: `${p.combo_n} × k ${p.k}, 1 in ${p.m}`, mode: 'lines', line: { color: '#1e8449', width: 3 } },
+    { x: q.identity, y: q.single, name: `k ${p.k}, 1 in ${p.m}`, mode: 'lines', line: { color: '#888', dash: 'dot' } },
+    { x: q.identity, y: q.single_equal, name: `k ${p.k}, ${equal} (same postings)`, mode: 'lines', line: { color: '#2c6fbb' } },
+    { x: q.identity, y: q.single_weight, name: `k ${q.weight}, ${equal} (same postings, same letters)`, mode: 'lines', line: { color: '#c0392b' } },
+  ];
+  const row = p.alphabet === 'protein' && p.length === (comboGrid?.mate) && p.paired
+    ? comboGrid?.rows.find((x) => x.k === p.k && x.n === p.combo_n && x.lo === p.combo_lo && x.hi === p.combo_hi) : null;
+  const level = Math.log2(p.m);
+  if (row && row.recall[level]) {
+    const mids = comboGrid.bins.slice(0, -1).map((b, i) => (b + Math.min(comboGrid.bins[i + 1], 1)) / 2);
+    lines.push({ x: mids, y: row.recall[level], ...SIMULATED });
+  }
+  Plotly.react('plot-combo-identity', lines, {
+    ...LAYOUT, uirevision: 1, legend: { orientation: 'h', y: -0.28 }, title: { text: `Anchor recall (read of ${p.length} letters)`, font: { size: 14 } },
+    xaxis: { ...AXIS, title: { text: 'Identity' } }, yaxis: { ...AXIS, title: { text: 'Anchor recall' }, range: [0, 1] },
+  }, CONFIG);
+  const perM = q.postings_combo * p.m;
+  Plotly.react('plot-combo-size', [
+    { x: q.ms.map((m) => perM / m), y: q.by_m_combo, name: `${p.combo_n} × k ${p.k}`, mode: 'lines+markers', marker: { size: 5 }, line: { color: '#1e8449', width: 3 } },
+    { x: q.ms.map((m) => perM / q.g / m), y: q.by_m_single, name: `k ${p.k}`, mode: 'lines+markers', marker: { size: 5 }, line: { color: '#2c6fbb' } },
+  ], {
+    ...LAYOUT, uirevision: 1, title: { text: `Recall against postings, at identity ${p.identity.toFixed(2)}`, font: { size: 14 } },
+    xaxis: { ...AXIS, type: 'log', title: { text: 'Postings' } }, yaxis: { ...AXIS, title: { text: 'Anchor recall' }, range: [0, 1] },
+  }, CONFIG);
+  const scanAxes = {
+    xaxis: { ...AXIS, type: 'category', title: { text: `Window's upper bound (lower bound ${p.combo_lo})` } },
+    yaxis: { ...AXIS, type: 'category', title: { text: 'Sparsity, 1 in m' } },
+  };
+  const hover = q.scan_postings.map((row) => row.map((x) => x.toExponential(1).replace('e+', 'e')));
+  Plotly.react('plot-combo-scan-recall', [{
+    type: 'heatmap', x: q.scan_hi.map(String), y: q.scan_ms.map(String), z: q.scan_recall, zmin: 0, zmax: 1, colorscale: 'Viridis', customdata: hover,
+    hovertemplate: 'window to %{x}, 1 in %{y}: recall %{z:.3f}, %{customdata} postings<extra></extra>', colorbar: { title: { text: 'Recall' } },
+  }], { ...LAYOUT, uirevision: 1, title: { text: `Anchor recall at identity ${p.identity.toFixed(2)}`, font: { size: 14 } }, ...scanAxes }, CONFIG);
+  const logChance = q.scan_chance.map((row) => row.map((x) => (x > 0 ? Math.log10(x) : null)));
+  Plotly.react('plot-combo-scan-chance', [{
+    type: 'heatmap', x: q.scan_hi.map(String), y: q.scan_ms.map(String), z: logChance, colorscale: 'Viridis', customdata: hover,
+    hovertemplate: 'window to %{x}, 1 in %{y}: 10^%{z:.1f} chance per read, %{customdata} postings<extra></extra>', colorbar: { title: { text: 'log10' } },
+  }], { ...LAYOUT, uirevision: 1, title: { text: 'Chance anchors per read, log10', font: { size: 14 } }, ...scanAxes }, CONFIG);
+}
+
 function draw(r, p) {
   if (r.snp) drawSnp(r.snp, p);
+  if (r.combo) drawCombo(r.combo, p);
   el('recall').textContent = r.recall.toFixed(3);
   el('index').textContent = size(r.index_gb);
   el('postings').textContent = r.postings.toExponential(1).replace('e+', 'e');
@@ -309,6 +377,7 @@ function update() {
 el('controls').addEventListener('input', update);
 el('precision-form').addEventListener('input', update);
 el('snp-form').addEventListener('input', update);
+el('combo-form').addEventListener('input', update);
 update();
 
 for (const [alphabet, file] of Object.entries(GRID_FILES)) {

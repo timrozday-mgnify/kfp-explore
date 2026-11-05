@@ -317,7 +317,7 @@ Phases 1–3 are the plan. The rest is a backlog, reordered as questions come up
 - Readouts: index size at a chosen database size, and chance anchors per read.
 - *Done when:* the check's tolerances hold, and slider moves redraw with no visible lag in a browser.
 
-Phases 1–3 and 3b are built, phase 3c is partly done, phase 4 is mostly done, phase 6 has tables and a panel, precision is computed on demand at k 1–31, and phase 7 is built (below). Phases 5, 8 and 9 have not started.
+Phases 1–3 and 3b are built, phase 3c is partly done, phase 4 is mostly done, phase 6 has tables and a panel, precision is computed on demand at k 1–31, and phases 7 and 9 are built (below). Phases 5 and 8 have not started; both need results at scale.
 
 **Phase 2: analyse a small set in the browser.**
 
@@ -659,6 +659,27 @@ by the user.
   - **Method.** The fewest substitutions are a greedy hitting set over key intervals, optimal on a line. The removal curve counts sets of positions exactly, by a recurrence left to right, in `model.removal_curve`. A read's chance of no key follows from spacing: (1 − 1/m)^W sampled, max(1 − W/m, 0) evenly spaced, and (m − W)(m − W + 1) / (m(m + 1)) for minimizers with gaps taken as uniform, W being the read's windows.
   - **Checks (`checks/test_snp.py`).** Hitting set and curve match every position set on 200 random small reads, within 10⁻⁹. No-key chance is within 0.03 of simulated reads on 8 settings (the largest gap 0.017). Recall under uniform changes is within 0.02 of simulation.
   - **Limits.** Positions are read letters; a substitution is taken to break exactly the keys overlapping it, so a change that happens to create another key is ignored. The 0.75 non-synonymous share and 3× per codon are the plan's approximations, not measured. Uniform changes and the chain differ at the same identity by design; the chain's conservation is the calibrated one. Minimizers here rank k-mers at random, where kfp ranks by rarity.
+
+- **2026-11-05: phase 9, combination k-mers.** New panel: pairs or triples of k-mers, hashed as one feature with the gaps left out, sampled at 1 in m, within a distance window with its lower and upper bounds as controls. Distances are between k-mer starts, as kfp's `--min-gap` and `--gap`: consecutive k-mers at least the lower bound apart, first to last at most the upper bound, so a lower bound under k allows overlap. Plots compare single k-mers at the same k and m, at equal postings and with as many letters; two heatmaps show recall and chance across upper bound and sparsity. `measure/combo_grid.py` simulates recall and chance for 24 configurations (`web/data/sim-combo.json`; 38,270 groups, 6,750 read pairs), and points appear at those settings. A first version hashed exact gaps; dropped at the user's request (2026-11-05).
+  - **Method.** `model.combo_counts` draws reads from the same conserved blocks and read rate as the k-mer model and counts matching features. Given a read's count C, none survive sampling with chance (1 − 1/m)^C, so one draw serves every m. Work per slider move is capped, so very long reads with many feature sets, and the heatmaps, use fewer reads and are noisier. Chance: with gaps not hashed, a read's feature can meet an index feature from any distance, so it grows with the square of the features per start G, while postings grow with G.
+  - **Checks (`checks/test_combo.py`), nothing fitted.** Against simulation, m 1 to 128: recall RMSE 0.041 for singles and pairs, 0.045 for triples, bias −0.009 to −0.028. A single k-mer through the counts matches the chain, RMSE 0.007. Feature counts reproduce kfp's 11, 9 and 36. Simulated reads against kfp's mode table (two shared features on a read, 0.6–0.7 and 0.5–0.6): RMSE 0.053, mean −0.042, though kfp's are exact-gap, on four families and on conserved features. Decoys over composition: 1.11–1.73 across 14 configurations with at least 100 matches, across windows, which supports the G² term.
+  - **Window and sparsity, simulated.** At the postings of single k-mers at 1 in 8, recall per read pair at identity 0.5 / 0.6 / 0.7 / 0.75 / 0.8, and chance anchors per pair in frame:
+
+    | Feature | Sparsity | Recall | Chance |
+    | --- | --- | --- | --- |
+    | k 6 | 1 in 8 | 0.46 / 0.70 / 0.90 / 0.93 / 0.98 | 7.5 |
+    | 3-mer pairs, window 3–6 | 1 in 32 | 0.49 / 0.71 / 0.85 / 0.93 / 0.98 | 27 |
+    | 3-mer pairs, window 3–13 | 1 in 88 | 0.42 / 0.64 / 0.79 / 0.90 / 0.95 | 66 |
+    | 3-mer pairs, window 14–26 | 1 in 104 | 0.27 / 0.50 / 0.68 / 0.84 / 0.92 | 50 |
+    | 3-mer pairs, window 1–6 | 1 in 48 | 0.54 / 0.78 / 0.89 / 0.94 / 0.98 | 350 |
+    | k 5 | 1 in 8 | 0.59 / 0.82 / 0.94 / 0.97 / 0.98 | 115 |
+    | k 8 | 1 in 8 | 0.23 / 0.48 / 0.78 / 0.83 / 0.95 | 0.034 |
+    | 4-mer pairs, window 4–6 | 1 in 24 | 0.27 / 0.52 / 0.74 / 0.84 / 0.93 | 0.089 |
+    | 4-mer pairs, window 4–12 | 1 in 72 | 0.23 / 0.46 / 0.72 / 0.80 / 0.91 | 0.24 |
+    | 4-mer pairs, window 8–16 | 1 in 72 | 0.17 / 0.41 / 0.64 / 0.77 / 0.88 | 0.21 |
+
+    Sparsities not at a power of two are interpolated. **At equal postings a narrow window is better on both counts, and far windows are worst:** widening raises postings by G and chance by G², so m must rise with G while chance per posting still grows. Near windows also hold more conserved letters together. Overlap (lower bound under k) buys recall at much higher chance. No pair window beats single k-mers at equal postings and chance here: 3-mer pairs at 3–6 match k 6's recall at 3.6× its chance, and 4-mer pairs at 4–6 match k 8's at 2.6×.
+  - **Limits.** Any-anchor recall only: scores, floors, the multi-hit rule and precision are not modelled for combinations, and those are where a pair's specificity might pay. Simulated reads are real relatives, so hold their indels, but the model's draws have none, which may be part of its low bias. Protein simulation only. Decoy counts are too few to read for 5-mer pairs and above. The panel's postings count feature sets per start; simulated distinct features were 3–9% below that.
 
 ## Licence
 

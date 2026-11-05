@@ -391,6 +391,7 @@ def compute(params_json):
         "chance": base,
         "chance_corrected": corrected,
         "snp": snp_panel(a, within) if "placement" in a else None,
+        "combo": combo_panel(a, within, s2, n_postings) if "combo_n" in a else None,
     })
 
 
@@ -502,4 +503,120 @@ def snp_panel(a, within):
         "at_d": float(curve[min(a["d"], d_max)]), "mean_at_d": float(mean[min(a["d"], d_max)]),
         "no_key": no_key_chance(length, k, m, placement, paired), "rate": rate, "identity": identity,
         "recall_chain": chain, "recall_uniform": survive,
+    }  # fmt: skip
+
+
+# Combination k-mers: n k-mers in order within a distance window, hashed as one feature, gaps not
+# hashed, so a shared pair counts at any distance in the window and indels keep it.
+COMBO_IDENTITIES = np.round(np.arange(0.5, 1.001, 0.02), 2)
+COMBO_READS = 320  # per identity, across the read rate's nodes
+COMBO_WORK = 3e8  # letters x feature sets to draw on a slider move; beyond this, fewer reads
+COMBO_SCAN_HI = (2, 4, 6, 8, 10, 13, 16, 20, 26, 32, 40, 50)  # upper bounds across the window plots
+COMBO_SCAN_MS = 2.0 ** np.arange(0, 11)
+
+
+def combo_sets(n, lo, hi):
+    """Each later k-mer's start after the first's: consecutive starts at least ``lo`` apart, first to
+    last at most ``hi``, as kfp's --min-gap and --gap."""
+    sets = [()]
+    for _ in range(n - 1):
+        sets = [(*s, (s[-1] if s else 0) + g) for s in sets for g in range(lo, hi + 1) if (s[-1] if s else 0) + g <= hi]
+    return sets
+
+
+def _letters(offsets, k):
+    """Letters a feature fixes, overlapping k-mers sharing theirs."""
+    starts = (0, *offsets)
+    return k + sum(min(k, b - a) for a, b in zip(starts, starts[1:], strict=False))
+
+
+def combo_counts(length, k, n, lo, hi, paired, within=0.0, work=COMBO_WORK, conservation=CONSERVATION, shape=READ_RATE):
+    """Matching features per read pair, by identity and read: letters are drawn from the chain's site
+    classes, as the k-mer model's. Given a read's count C, hash sampling keeps none with chance
+    (1 - 1/m)^C, so one draw serves every m. Reads' positions match their relative's, so a shared pair
+    at another distance (an indel) is not drawn."""
+    return _combo_counts(length, k, n, lo, hi, paired, within, work, conservation, shape)
+
+
+@lru_cache(maxsize=64)
+def _combo_counts(length, k, n, lo, hi, paired, within, work, conservation, shape):
+    phi, rho, ell = conservation
+    rng = np.random.default_rng(1)
+    lam = rates(shape)
+    sets = combo_sets(n, lo, hi)
+    cost = len(COMBO_IDENTITIES) * COMBO_READS * length * (2 if paired else 1) * max(len(sets), 1)
+    reads = int(COMBO_READS * min(work / cost, 1)) // len(lam) * len(lam)  # noisier where it costs most
+    rate = np.resize(lam, max(reads, 2 * len(lam)))
+    local = np.clip(COMBO_IDENTITIES[:, None] ** rate, 1e-4, 1 - 1e-9)
+    id0, id1 = classes(local.ravel(), phi, rho)
+    id0, id1 = id0 + (1 - id0) * within, id1 + (1 - id1) * within
+    to_v, to_c = 1 / ell, phi / ell / (1 - phi)
+    total = np.zeros(id0.size)
+    for _ in range(2 if paired else 1):
+        conserved = rng.random(id0.size) < phi
+        match = np.zeros((id0.size, length), bool)
+        for i in range(length):
+            match[:, i] = rng.random(id0.size) < np.where(conserved, id0, id1)
+            conserved = rng.random(id0.size) < np.where(conserved, 1 - to_v, to_c)
+        run = np.cumsum(np.c_[np.zeros(id0.size, int), match], axis=1)
+        whole = (run[:, k:] - run[:, :-k]) == k  # each window's k-mer matches
+        for offsets in sets:
+            last = offsets[-1] if offsets else 0
+            if whole.shape[1] <= last:
+                continue
+            both = whole[:, : whole.shape[1] - last].copy()
+            for o in offsets:
+                both &= whole[:, o : whole.shape[1] - last + o]
+            total += both.sum(1)
+    return total.reshape(local.shape)
+
+
+def combo_recall(length, k, n, lo, hi, m, paired=True, within=0.0, ceiling=CEILING, work=COMBO_WORK):
+    """P(a read pair holds a sampled matching feature), by identity (COMBO_IDENTITIES)."""
+    counts = combo_counts(length, k, n, lo, hi, paired, within, work)
+    return ceiling * (1 - ((1 - 1 / m) ** counts).mean(1))
+
+
+def combo_chance(length, k, n, lo, hi, paired, frames, n_postings, s2):
+    """Chance anchors per read from composition. ``n_postings``: one feature set's at this m. With the
+    gaps not hashed, a read's feature can meet an index feature from any set of offsets: all the
+    letters must agree across different sets, and those they fix across the same set."""
+    sets = combo_sets(n, lo, hi)
+    per = np.array([max(length - k - (s[-1] if s else 0) + 1, 0) for s in sets], float)
+    same = np.array([s2 ** _letters(s, k) for s in sets])
+    return (2 if paired else 1) * frames * n_postings * ((per * same).sum() + per.sum() * (len(sets) - 1) * s2 ** (n * k))
+
+
+def combo_panel(a, within, s2, n_postings):
+    """Combination k-mers beside single k-mers, and recall and chance across window and sparsity.
+    ``n_postings``: a single k-mer's at this m, so one feature set's of the combination's."""
+    k, m, n, lo, hi, length, paired = a["k"], a["m"], a["combo_n"], a["combo_lo"], a["combo_hi"], a["length"], a["paired"]
+    sets = combo_sets(n, lo, hi)
+    frames = 2 if a["alphabet"] == "dna" else FRAMES
+    if not sets or lo * (n - 1) + k > length:
+        return {"available": False, "reason": "window" if not sets else "read"}
+    g, weight, ids = len(sets), n * k, COMBO_IDENTITIES
+    single = lambda kk, mm: recall(length, kk, mm, ids, paired=paired, within=within)  # noqa: E731
+    equal = max(m / g, 1.0)
+    at = int(np.argmin(np.abs(ids - a["identity"])))
+    ms = 2.0 ** np.arange(0, 14)
+    # Across the window's upper bound and sparsity, at this identity and lower bound.
+    his = [x for x in COMBO_SCAN_HI if x >= lo * (n - 1)]
+    scan = [combo_counts(length, k, n, lo, x, paired, within, COMBO_WORK / 8)[at] for x in his]
+    one = n_postings * m  # one feature set's postings at 1 in 1
+    return {
+        "available": True, "g": g, "weight": weight, "identity": ids.tolist(),
+        "combo": combo_recall(length, k, n, lo, hi, m, paired, within).tolist(),
+        "single": single(k, float(m)).tolist(), "single_equal": single(k, equal).tolist(), "equal_m": m / g,
+        "single_weight": single(weight, equal).tolist(), "at": at, "ms": ms.tolist(), "one": one,
+        "postings_combo": n_postings * g,
+        "by_m_combo": [float(combo_recall(length, k, n, lo, hi, float(x), paired, within)[at]) for x in ms],
+        "by_m_single": recall(length, k, ms, ids[at], paired=paired, within=within).tolist(),
+        "chance": combo_chance(length, k, n, lo, hi, paired, frames, n_postings, s2),
+        "chance_single": (2 if paired else 1) * max(length - k + 1, 0) * frames * n_postings * s2**k,
+        "bits": -weight * float(np.log2(s2)),
+        "scan_hi": his, "scan_ms": COMBO_SCAN_MS.tolist(),
+        "scan_recall": [[CEILING * float((1 - (1 - 1 / x) ** c).mean()) for c in scan] for x in COMBO_SCAN_MS],
+        "scan_chance": [[combo_chance(length, k, n, lo, h, paired, frames, one / x, s2) for h in his] for x in COMBO_SCAN_MS],
+        "scan_postings": [[one * len(combo_sets(n, lo, h)) / x for h in his] for x in COMBO_SCAN_MS],
     }  # fmt: skip

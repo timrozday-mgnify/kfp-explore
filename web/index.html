@@ -25,6 +25,8 @@
   #policy-plots > div { height: 500px; }
   #snp-plots { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 8px; }
   #snp-plots > div { height: 360px; }
+  #combo-plots { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 8px; }
+  #combo-plots > div { height: 400px; }
   .readouts { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; margin: 8px 0; }
   .readouts b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
   p.note { color: #666; max-width: 70em; }
@@ -178,6 +180,28 @@ structure, so treat it as a rough guide.</p>
 </div>
 <div id="snp-plots"><div id="plot-snp-keys"></div><div id="plot-snp-curve"></div></div>
 <p class="note">Uses k, sparsity, read length and pairing from the top of the page. A substitution removes every key overlapping it. The fewest that remove all keys are shown in red, and are the worst case at that number. For protein, a base change reaches a residue at about 3 × the rate per base, × 0.75 non-synonymous, less substitutions staying within a class on a reduced alphabet; nucleotide mode uses the rate per base. Uniform changes place them at random across the read, while the model's conserved blocks and rate per read concentrate them, and include kfp's 0.96 ceiling, so the two differ at the same identity. A pair's mates are drawn separately, and the chance of no key takes them as independent; minimizers take gaps as uniform.</p>
+<h2>Combination k-mers</h2>
+<form id="combo-form">
+  <label>k-mers per feature
+    <select id="combo_n"><option value="2">2 (pairs)</option><option value="3">3 (triples)</option></select>
+  </label>
+  <label>Distance window, at least <span id="combo_lo-out"></span><input type="range" id="combo_lo" min="1" max="50" step="1" value="3"></label>
+  <label>Distance window, at most <span id="combo_hi-out"></span><input type="range" id="combo_hi" min="1" max="100" step="1" value="13"></label>
+</form>
+<div id="combo-unavailable" class="note" role="status" hidden></div>
+<div id="combo-results">
+  <div class="readouts">
+    <div>Features per start<b id="c-g">–</b></div>
+    <div>Chance bits per feature<b id="c-bits">–</b></div>
+    <div>Anchor recall at this identity<b id="c-recall">–</b></div>
+    <div>Single k-mers, same postings<b id="c-equal">–</b></div>
+    <div>Postings<b id="c-postings">–</b></div>
+    <div>Chance anchors per read<b id="c-chance">–</b></div>
+    <div>Single k-mers, same k and m: chance<b id="c-chance-single">–</b></div>
+  </div>
+  <div id="combo-plots"><div id="plot-combo-identity"></div><div id="plot-combo-size"></div><div id="plot-combo-scan-recall"></div><div id="plot-combo-scan-chance"></div></div>
+</div>
+<p class="note" id="combo-note">Uses k, sparsity, read length, pairing and identity from the top of the page. A feature is n k-mers in order, hashed as one with the gaps left out, then sampled at 1 in m. Distances are between k-mer starts: consecutive k-mers at least the lower bound apart, first to last at most the upper bound, so a lower bound under k lets k-mers overlap. A shared pair counts at any distance in the window, so indels keep it, and each read feature can meet index features at any distance, so chance grows faster than postings as the window widens. Recall comes from reads drawn with the same conserved blocks and read rate as the k-mer model, with kfp's 0.96 ceiling; simulated points have no ceiling. Chance is from composition, a lower bound. The window plots use fewer drawn reads, so they are noisier. Same postings means the single k-mers' sparsity is m over the features per start; denser than 1 in 1 is shown at 1 in 1.</p>
 <h2>Grouping and key policy</h2>
 <form id="policy-form">
   <label>Compare
@@ -257,7 +281,7 @@ random to stay within wasm's memory. "Independent" is what independent residues 
 composition would give. Decoys are one random half's sequences reversed, matched to the other half.
 Between halves counts matches between sequences of the two halves, so with homologues it is far
 above chance. Above k 7 in a set this small, a few k-mers dominate the decoy rate.</p>
-<script src="https://cdn.jsdelivr.net/npm/plotly.js-basic-dist-min@2.35.2/plotly-basic.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-cartesian-dist-min@2.35.2/plotly-cartesian.min.js"></script>
 <script src="main.js"></script>
 </body>
 </html>
